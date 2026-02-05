@@ -236,6 +236,21 @@ impl Strata {
             .map_err(to_napi_err)
     }
 
+    /// Get version history for a state cell.
+    #[napi(js_name = "stateHistory")]
+    pub fn state_history(&self, cell: String) -> napi::Result<serde_json::Value> {
+        match self.inner.state_getv(&cell).map_err(to_napi_err)? {
+            Some(versions) => {
+                let arr: Vec<serde_json::Value> = versions
+                    .into_iter()
+                    .map(versioned_to_js)
+                    .collect();
+                Ok(serde_json::Value::Array(arr))
+            }
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
     // =========================================================================
     // Event Log
     // =========================================================================
@@ -294,6 +309,21 @@ impl Strata {
     #[napi(js_name = "jsonDelete")]
     pub fn json_delete(&self, key: String, path: String) -> napi::Result<u32> {
         self.inner.json_delete(&key, &path).map(|n| n as u32).map_err(to_napi_err)
+    }
+
+    /// Get version history for a JSON document.
+    #[napi(js_name = "jsonHistory")]
+    pub fn json_history(&self, key: String) -> napi::Result<serde_json::Value> {
+        match self.inner.json_getv(&key).map_err(to_napi_err)? {
+            Some(versions) => {
+                let arr: Vec<serde_json::Value> = versions
+                    .into_iter()
+                    .map(versioned_to_js)
+                    .collect();
+                Ok(serde_json::Value::Array(arr))
+            }
+            None => Ok(serde_json::Value::Null),
+        }
     }
 
     /// List JSON document keys.

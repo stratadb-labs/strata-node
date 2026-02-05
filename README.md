@@ -148,6 +148,7 @@ if (newVersion === null) {
 | `stateGet(cell)` | Get value |
 | `stateInit(cell, value)` | Initialize if not exists |
 | `stateCas(cell, newValue, expectedVersion?)` | Compare-and-swap (version-based) |
+| `stateHistory(cell)` | Get version history |
 
 ### Event Log
 
@@ -165,6 +166,7 @@ if (newVersion === null) {
 | `jsonSet(key, path, value)` | Set at JSONPath |
 | `jsonGet(key, path)` | Get at JSONPath |
 | `jsonDelete(key, path)` | Delete |
+| `jsonHistory(key)` | Get version history |
 | `jsonList(limit, prefix?, cursor?)` | List keys |
 
 ### Vector Store

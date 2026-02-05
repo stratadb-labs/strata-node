@@ -185,6 +185,13 @@ export class Strata {
    */
   stateCas(cell: string, newValue: JsonValue, expectedVersion?: number): number | null;
 
+  /**
+   * Get version history for a state cell.
+   * @param cell - The cell name
+   * @returns Array of versioned values, or null if cell not found
+   */
+  stateHistory(cell: string): VersionedValue[] | null;
+
   // =========================================================================
   // Event Log
   // =========================================================================
@@ -245,6 +252,13 @@ export class Strata {
    * @returns Version number
    */
   jsonDelete(key: string, path: string): number;
+
+  /**
+   * Get version history for a JSON document.
+   * @param key - The document key
+   * @returns Array of versioned values, or null if document not found
+   */
+  jsonHistory(key: string): VersionedValue[] | null;
 
   /**
    * List JSON document keys.
