@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/strata-systems/strata-node.git"
+    "url": "git+https://github.com/stratadb-labs/strata-node.git"
   },
   "keywords": [
     "stratadb",
@@ -26,12 +26,12 @@
     "kv-store",
     "napi-rs"
   ],
-  "author": "Strata Systems",
+  "author": "StrataDB Labs",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/strata-systems/strata-node/issues"
+    "url": "https://github.com/stratadb-labs/strata-node/issues"
   },
-  "homepage": "https://github.com/strata-systems/strata-node#readme",
+  "homepage": "https://stratadb.org",
   "napi": {
     "name": "stratadb",
     "triples": {
