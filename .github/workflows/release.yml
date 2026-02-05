@@ -92,12 +92,12 @@ jobs:
       - name: List packages
         run: ls -R npm || true
 
-      - name: Debug token
+      - name: Setup npm auth
         run: |
-          echo "Token length: ${#NODE_AUTH_TOKEN}"
-          echo "Token prefix: ${NODE_AUTH_TOKEN:0:4}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+          echo "Token length: $(echo -n "${{ secrets.NPM_TOKEN }}" | wc -c)"
+          cat ~/.npmrc | head -c 50
+          echo "..."
 
       - name: Publish platform packages
         run: |
@@ -109,11 +109,7 @@ jobs:
               cd ../..
             fi
           done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
         run: |
           npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
