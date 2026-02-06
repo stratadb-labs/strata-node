@@ -133,6 +133,34 @@ export interface BatchVectorEntry {
   metadata?: JsonValue;
 }
 
+/** Transaction info */
+export interface TransactionInfo {
+  id: string;
+  status: string;
+  startedAt: number;
+}
+
+/** Metadata filter for vector search */
+export interface MetadataFilter {
+  field: string;
+  op: 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'contains';
+  value: JsonValue;
+}
+
+/** KV list result with pagination */
+export interface KvListResult {
+  keys: string[];
+}
+
+/** Cross-primitive search result */
+export interface SearchHit {
+  entity: string;
+  primitive: string;
+  score: number;
+  rank: number;
+  snippet?: string;
+}
+
 /**
  * StrataDB database handle.
  *
@@ -533,4 +561,152 @@ export class Strata {
    * @returns Validation result
    */
   branchValidateBundle(path: string): BundleValidateResult;
+
+  // =========================================================================
+  // Transaction Operations (MVP+1)
+  // =========================================================================
+
+  /**
+   * Begin a new transaction.
+   * @param readOnly - Whether the transaction is read-only
+   */
+  begin(readOnly?: boolean): void;
+
+  /**
+   * Commit the current transaction.
+   * @returns Commit version number
+   */
+  commit(): number;
+
+  /**
+   * Rollback the current transaction.
+   */
+  rollback(): void;
+
+  /**
+   * Get current transaction info.
+   * @returns Transaction info, or null if no transaction is active
+   */
+  txnInfo(): TransactionInfo | null;
+
+  /**
+   * Check if a transaction is currently active.
+   */
+  txnIsActive(): boolean;
+
+  // =========================================================================
+  // Missing State Operations (MVP+1)
+  // =========================================================================
+
+  /**
+   * Delete a state cell.
+   * @param cell - The cell name
+   * @returns True if the cell was deleted
+   */
+  stateDelete(cell: string): boolean;
+
+  /**
+   * List state cell names with optional prefix filter.
+   * @param prefix - Optional prefix filter
+   * @returns Array of cell names
+   */
+  stateList(prefix?: string): string[];
+
+  // =========================================================================
+  // Versioned Getters (MVP+1)
+  // =========================================================================
+
+  /**
+   * Get a value by key with version info.
+   * @param key - The key to retrieve
+   * @returns Versioned value, or null if not found
+   */
+  kvGetVersioned(key: string): VersionedValue | null;
+
+  /**
+   * Get a state cell value with version info.
+   * @param cell - The cell name
+   * @returns Versioned value, or null if not found
+   */
+  stateGetVersioned(cell: string): VersionedValue | null;
+
+  /**
+   * Get a JSON document value with version info.
+   * @param key - The document key
+   * @returns Versioned value, or null if not found
+   */
+  jsonGetVersioned(key: string): VersionedValue | null;
+
+  // =========================================================================
+  // Pagination Improvements (MVP+1)
+  // =========================================================================
+
+  /**
+   * List keys with pagination support.
+   * @param prefix - Optional prefix filter
+   * @param limit - Maximum number of keys
+   * @param cursor - Pagination cursor
+   * @returns Result with keys array
+   */
+  kvListPaginated(prefix?: string, limit?: number, cursor?: string): KvListResult;
+
+  /**
+   * List events by type with pagination support.
+   * @param eventType - Event type to filter
+   * @param limit - Maximum number of events
+   * @param after - Sequence number to start after
+   * @returns Array of events
+   */
+  eventListPaginated(eventType: string, limit?: number, after?: number): VersionedValue[];
+
+  // =========================================================================
+  // Enhanced Vector Search (MVP+1)
+  // =========================================================================
+
+  /**
+   * Search for similar vectors with optional filter and metric override.
+   * @param collection - Collection name
+   * @param query - Query vector
+   * @param k - Number of results
+   * @param metric - Optional metric override ("cosine", "euclidean", "dot_product")
+   * @param filter - Optional metadata filters
+   * @returns Array of search matches
+   */
+  vectorSearchFiltered(
+    collection: string,
+    query: number[],
+    k: number,
+    metric?: string,
+    filter?: MetadataFilter[]
+  ): SearchMatch[];
+
+  // =========================================================================
+  // Space Operations (MVP+1)
+  // =========================================================================
+
+  /**
+   * Create a new space explicitly.
+   * @param space - Space name
+   */
+  spaceCreate(space: string): void;
+
+  /**
+   * Check if a space exists in the current branch.
+   * @param space - Space name
+   * @returns True if the space exists
+   */
+  spaceExists(space: string): boolean;
+
+  // =========================================================================
+  // Search (MVP+1)
+  // =========================================================================
+
+  /**
+   * Search across multiple primitives for matching content.
+   * @param query - Search query
+   * @param k - Maximum number of results
+   * @param primitives - Optional list of primitives to search
+   * @returns Array of search hits
+   */
+  search(query: string, k?: number, primitives?: string[]): SearchHit[];
 }

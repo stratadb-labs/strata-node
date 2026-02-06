@@ -7,10 +7,13 @@
 use napi_derive::napi;
 use std::collections::HashMap;
 
+use std::cell::RefCell;
+
 use stratadb::{
     BatchVectorEntry, BranchExportResult, BranchImportResult, BundleValidateResult,
-    CollectionInfo, DistanceMetric, Error as StrataError, MergeStrategy,
-    Strata as RustStrata, Value, VersionedBranchInfo, VersionedValue,
+    CollectionInfo, Command, DistanceMetric, Error as StrataError, FilterOp, MergeStrategy,
+    MetadataFilter, Output, Session, Strata as RustStrata, TxnOptions, Value,
+    VersionedBranchInfo, VersionedValue,
 };
 
 /// Convert a JavaScript value to a stratadb Value.
@@ -129,6 +132,8 @@ fn to_napi_err(e: StrataError) -> napi::Error {
 #[napi]
 pub struct Strata {
     inner: RustStrata,
+    /// Session for transaction support. Lazily initialized.
+    session: RefCell<Option<Session>>,
 }
 
 #[napi]
@@ -137,14 +142,20 @@ impl Strata {
     #[napi(factory)]
     pub fn open(path: String) -> napi::Result<Self> {
         let inner = RustStrata::open(&path).map_err(to_napi_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            session: RefCell::new(None),
+        })
     }
 
     /// Create an in-memory database (no persistence).
     #[napi(factory)]
     pub fn cache() -> napi::Result<Self> {
         let inner = RustStrata::cache().map_err(to_napi_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            session: RefCell::new(None),
+        })
     }
 
     // =========================================================================
@@ -717,6 +728,432 @@ impl Strata {
             .branch_validate_bundle(&path)
             .map_err(to_napi_err)?;
         Ok(bundle_validate_result_to_js(result))
+    }
+
+    // =========================================================================
+    // Transaction Operations (MVP+1)
+    // =========================================================================
+
+    /// Begin a new transaction.
+    ///
+    /// All subsequent data operations will be part of this transaction until
+    /// commit() or rollback() is called.
+    #[napi(js_name = "begin")]
+    pub fn begin(&self, read_only: Option<bool>) -> napi::Result<()> {
+        let mut session_ref = self.session.borrow_mut();
+        if session_ref.is_none() {
+            *session_ref = Some(self.inner.session());
+        }
+        let session = session_ref.as_mut().unwrap();
+
+        let cmd = Command::TxnBegin {
+            branch: None,
+            options: Some(TxnOptions {
+                read_only: read_only.unwrap_or(false),
+            }),
+        };
+        session.execute(cmd).map_err(to_napi_err)?;
+        Ok(())
+    }
+
+    /// Commit the current transaction.
+    ///
+    /// Returns the commit version number.
+    #[napi]
+    pub fn commit(&self) -> napi::Result<u32> {
+        let mut session_ref = self.session.borrow_mut();
+        let session = session_ref
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("No transaction active"))?;
+
+        match session.execute(Command::TxnCommit).map_err(to_napi_err)? {
+            Output::TxnCommitted { version } => Ok(version as u32),
+            _ => Err(napi::Error::from_reason("Unexpected output for TxnCommit")),
+        }
+    }
+
+    /// Rollback the current transaction.
+    #[napi]
+    pub fn rollback(&self) -> napi::Result<()> {
+        let mut session_ref = self.session.borrow_mut();
+        let session = session_ref
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("No transaction active"))?;
+
+        session.execute(Command::TxnRollback).map_err(to_napi_err)?;
+        Ok(())
+    }
+
+    /// Get current transaction info.
+    ///
+    /// Returns an object with 'id', 'status', 'startedAt', or null if no transaction is active.
+    #[napi(js_name = "txnInfo")]
+    pub fn txn_info(&self) -> napi::Result<serde_json::Value> {
+        let mut session_ref = self.session.borrow_mut();
+        if session_ref.is_none() {
+            return Ok(serde_json::Value::Null);
+        }
+        let session = session_ref.as_mut().unwrap();
+
+        match session.execute(Command::TxnInfo).map_err(to_napi_err)? {
+            Output::TxnInfo(Some(info)) => Ok(serde_json::json!({
+                "id": info.id,
+                "status": format!("{:?}", info.status).to_lowercase(),
+                "startedAt": info.started_at,
+            })),
+            Output::TxnInfo(None) => Ok(serde_json::Value::Null),
+            _ => Err(napi::Error::from_reason("Unexpected output for TxnInfo")),
+        }
+    }
+
+    /// Check if a transaction is currently active.
+    #[napi(js_name = "txnIsActive")]
+    pub fn txn_is_active(&self) -> napi::Result<bool> {
+        let mut session_ref = self.session.borrow_mut();
+        if session_ref.is_none() {
+            return Ok(false);
+        }
+        let session = session_ref.as_mut().unwrap();
+
+        match session.execute(Command::TxnIsActive).map_err(to_napi_err)? {
+            Output::Bool(active) => Ok(active),
+            _ => Err(napi::Error::from_reason("Unexpected output for TxnIsActive")),
+        }
+    }
+
+    // =========================================================================
+    // Missing State Operations (MVP+1)
+    // =========================================================================
+
+    /// Delete a state cell.
+    ///
+    /// Returns true if the cell existed and was deleted, false otherwise.
+    #[napi(js_name = "stateDelete")]
+    pub fn state_delete(&self, cell: String) -> napi::Result<bool> {
+        match self
+            .inner
+            .executor()
+            .execute(Command::StateDelete {
+                branch: None,
+                space: None,
+                cell,
+            })
+            .map_err(to_napi_err)?
+        {
+            Output::Bool(deleted) => Ok(deleted),
+            _ => Err(napi::Error::from_reason("Unexpected output for StateDelete")),
+        }
+    }
+
+    /// List state cell names with optional prefix filter.
+    #[napi(js_name = "stateList")]
+    pub fn state_list(&self, prefix: Option<String>) -> napi::Result<Vec<String>> {
+        match self
+            .inner
+            .executor()
+            .execute(Command::StateList {
+                branch: None,
+                space: None,
+                prefix,
+            })
+            .map_err(to_napi_err)?
+        {
+            Output::Keys(keys) => Ok(keys),
+            _ => Err(napi::Error::from_reason("Unexpected output for StateList")),
+        }
+    }
+
+    // =========================================================================
+    // Versioned Getters (MVP+1)
+    // =========================================================================
+
+    /// Get a value by key with version info.
+    ///
+    /// Returns an object with 'value', 'version', 'timestamp', or null if key doesn't exist.
+    #[napi(js_name = "kvGetVersioned")]
+    pub fn kv_get_versioned(&self, key: String) -> napi::Result<serde_json::Value> {
+        match self.inner.kv_getv(&key).map_err(to_napi_err)? {
+            Some(versions) if !versions.is_empty() => {
+                Ok(versioned_to_js(versions.into_iter().next().unwrap()))
+            }
+            _ => Ok(serde_json::Value::Null),
+        }
+    }
+
+    /// Get a state cell value with version info.
+    ///
+    /// Returns an object with 'value', 'version', 'timestamp', or null if cell doesn't exist.
+    #[napi(js_name = "stateGetVersioned")]
+    pub fn state_get_versioned(&self, cell: String) -> napi::Result<serde_json::Value> {
+        match self.inner.state_getv(&cell).map_err(to_napi_err)? {
+            Some(versions) if !versions.is_empty() => {
+                Ok(versioned_to_js(versions.into_iter().next().unwrap()))
+            }
+            _ => Ok(serde_json::Value::Null),
+        }
+    }
+
+    /// Get a JSON document value with version info.
+    ///
+    /// Returns an object with 'value', 'version', 'timestamp', or null if key doesn't exist.
+    #[napi(js_name = "jsonGetVersioned")]
+    pub fn json_get_versioned(&self, key: String) -> napi::Result<serde_json::Value> {
+        match self.inner.json_getv(&key).map_err(to_napi_err)? {
+            Some(versions) if !versions.is_empty() => {
+                Ok(versioned_to_js(versions.into_iter().next().unwrap()))
+            }
+            _ => Ok(serde_json::Value::Null),
+        }
+    }
+
+    // =========================================================================
+    // Pagination Improvements (MVP+1)
+    // =========================================================================
+
+    /// List keys with pagination support.
+    ///
+    /// Returns an object with 'keys' array.
+    #[napi(js_name = "kvListPaginated")]
+    pub fn kv_list_paginated(
+        &self,
+        prefix: Option<String>,
+        limit: Option<u32>,
+        cursor: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        match self
+            .inner
+            .executor()
+            .execute(Command::KvList {
+                branch: None,
+                space: None,
+                prefix,
+                cursor,
+                limit: limit.map(|l| l as u64),
+            })
+            .map_err(to_napi_err)?
+        {
+            Output::Keys(keys) => Ok(serde_json::json!({ "keys": keys })),
+            _ => Err(napi::Error::from_reason("Unexpected output for KvList")),
+        }
+    }
+
+    /// List events by type with pagination support.
+    ///
+    /// Returns a list of event objects. Use `after` to paginate from a sequence number.
+    #[napi(js_name = "eventListPaginated")]
+    pub fn event_list_paginated(
+        &self,
+        event_type: String,
+        limit: Option<u32>,
+        after: Option<u32>,
+    ) -> napi::Result<serde_json::Value> {
+        match self
+            .inner
+            .executor()
+            .execute(Command::EventGetByType {
+                branch: None,
+                space: None,
+                event_type,
+                limit: limit.map(|l| l as u64),
+                after_sequence: after.map(|a| a as u64),
+            })
+            .map_err(to_napi_err)?
+        {
+            Output::VersionedValues(events) => {
+                let arr: Vec<serde_json::Value> =
+                    events.into_iter().map(versioned_to_js).collect();
+                Ok(serde_json::Value::Array(arr))
+            }
+            _ => Err(napi::Error::from_reason(
+                "Unexpected output for EventGetByType",
+            )),
+        }
+    }
+
+    // =========================================================================
+    // Enhanced Vector Search (MVP+1)
+    // =========================================================================
+
+    /// Search for similar vectors with optional filter and metric override.
+    #[napi(js_name = "vectorSearchFiltered")]
+    pub fn vector_search_filtered(
+        &self,
+        collection: String,
+        query: Vec<f64>,
+        k: u32,
+        metric: Option<String>,
+        filter: Option<Vec<serde_json::Value>>,
+    ) -> napi::Result<serde_json::Value> {
+        let vec: Vec<f32> = query.iter().map(|&f| f as f32).collect();
+
+        let metric_enum = match metric.as_deref() {
+            Some("cosine") => Some(DistanceMetric::Cosine),
+            Some("euclidean") => Some(DistanceMetric::Euclidean),
+            Some("dot_product") | Some("dotproduct") => Some(DistanceMetric::DotProduct),
+            Some(m) => return Err(napi::Error::from_reason(format!("Invalid metric: {}", m))),
+            None => None,
+        };
+
+        let filter_vec = match filter {
+            Some(arr) => {
+                let mut filters = Vec::new();
+                for item in arr {
+                    let obj = item
+                        .as_object()
+                        .ok_or_else(|| napi::Error::from_reason("Filter must be an object"))?;
+                    let field = obj
+                        .get("field")
+                        .and_then(|f| f.as_str())
+                        .ok_or_else(|| napi::Error::from_reason("Filter missing 'field'"))?
+                        .to_string();
+                    let op_str = obj
+                        .get("op")
+                        .and_then(|o| o.as_str())
+                        .ok_or_else(|| napi::Error::from_reason("Filter missing 'op'"))?;
+                    let op = match op_str {
+                        "eq" => FilterOp::Eq,
+                        "ne" => FilterOp::Ne,
+                        "gt" => FilterOp::Gt,
+                        "gte" => FilterOp::Gte,
+                        "lt" => FilterOp::Lt,
+                        "lte" => FilterOp::Lte,
+                        "in" => FilterOp::In,
+                        "contains" => FilterOp::Contains,
+                        _ => {
+                            return Err(napi::Error::from_reason(format!(
+                                "Invalid filter op: {}",
+                                op_str
+                            )))
+                        }
+                    };
+                    let value_json = obj
+                        .get("value")
+                        .ok_or_else(|| napi::Error::from_reason("Filter missing 'value'"))?
+                        .clone();
+                    let value = js_to_value(value_json);
+                    filters.push(MetadataFilter { field, op, value });
+                }
+                Some(filters)
+            }
+            None => None,
+        };
+
+        match self
+            .inner
+            .executor()
+            .execute(Command::VectorSearch {
+                branch: None,
+                space: None,
+                collection,
+                query: vec,
+                k: k as u64,
+                filter: filter_vec,
+                metric: metric_enum,
+            })
+            .map_err(to_napi_err)?
+        {
+            Output::VectorMatches(matches) => {
+                let arr: Vec<serde_json::Value> = matches
+                    .into_iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "key": m.key,
+                            "score": m.score,
+                            "metadata": m.metadata.map(value_to_js),
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::Value::Array(arr))
+            }
+            _ => Err(napi::Error::from_reason(
+                "Unexpected output for VectorSearch",
+            )),
+        }
+    }
+
+    // =========================================================================
+    // Space Operations (MVP+1)
+    // =========================================================================
+
+    /// Create a new space explicitly.
+    ///
+    /// Spaces are auto-created on first write, but this allows pre-creation.
+    #[napi(js_name = "spaceCreate")]
+    pub fn space_create(&self, space: String) -> napi::Result<()> {
+        match self
+            .inner
+            .executor()
+            .execute(Command::SpaceCreate {
+                branch: None,
+                space,
+            })
+            .map_err(to_napi_err)?
+        {
+            Output::Unit => Ok(()),
+            _ => Err(napi::Error::from_reason("Unexpected output for SpaceCreate")),
+        }
+    }
+
+    /// Check if a space exists in the current branch.
+    #[napi(js_name = "spaceExists")]
+    pub fn space_exists(&self, space: String) -> napi::Result<bool> {
+        match self
+            .inner
+            .executor()
+            .execute(Command::SpaceExists {
+                branch: None,
+                space,
+            })
+            .map_err(to_napi_err)?
+        {
+            Output::Bool(exists) => Ok(exists),
+            _ => Err(napi::Error::from_reason("Unexpected output for SpaceExists")),
+        }
+    }
+
+    // =========================================================================
+    // Search (MVP+1)
+    // =========================================================================
+
+    /// Search across multiple primitives for matching content.
+    ///
+    /// Returns a list of objects with 'entity', 'primitive', 'score', 'rank', 'snippet'.
+    #[napi]
+    pub fn search(
+        &self,
+        query: String,
+        k: Option<u32>,
+        primitives: Option<Vec<String>>,
+    ) -> napi::Result<serde_json::Value> {
+        match self
+            .inner
+            .executor()
+            .execute(Command::Search {
+                branch: None,
+                space: None,
+                query,
+                k: k.map(|n| n as u64),
+                primitives,
+            })
+            .map_err(to_napi_err)?
+        {
+            Output::SearchResults(results) => {
+                let arr: Vec<serde_json::Value> = results
+                    .into_iter()
+                    .map(|hit| {
+                        serde_json::json!({
+                            "entity": hit.entity,
+                            "primitive": hit.primitive,
+                            "score": hit.score,
+                            "rank": hit.rank,
+                            "snippet": hit.snippet,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::Value::Array(arr))
+            }
+            _ => Err(napi::Error::from_reason("Unexpected output for Search")),
+        }
     }
 }
 
