@@ -6,6 +6,7 @@
 
 const {
   Strata,
+  StrataSnapshot,
   StrataError,
   NotFoundError,
   ValidationError,
@@ -22,54 +23,66 @@ describe('Strata', () => {
   });
 
   // =========================================================================
-  // KV Store
+  // KV Store — db.kv
   // =========================================================================
 
-  describe('KV Store', () => {
-    test('put and get', async () => {
-      await db.kvPut('key1', 'value1');
-      expect(await db.kvGet('key1')).toBe('value1');
+  describe('db.kv', () => {
+    test('set and get', async () => {
+      await db.kv.set('key1', 'value1');
+      expect(await db.kv.get('key1')).toBe('value1');
     });
 
-    test('put and get object', async () => {
-      await db.kvPut('config', { theme: 'dark', count: 42 });
-      const result = await db.kvGet('config');
+    test('set and get object', async () => {
+      await db.kv.set('config', { theme: 'dark', count: 42 });
+      const result = await db.kv.get('config');
       expect(result.theme).toBe('dark');
       expect(result.count).toBe(42);
     });
 
     test('get missing returns null', async () => {
-      expect(await db.kvGet('nonexistent')).toBeNull();
+      expect(await db.kv.get('nonexistent')).toBeNull();
     });
 
     test('delete', async () => {
-      await db.kvPut('to_delete', 'value');
-      expect(await db.kvDelete('to_delete')).toBe(true);
-      expect(await db.kvGet('to_delete')).toBeNull();
+      await db.kv.set('to_delete', 'value');
+      expect(await db.kv.delete('to_delete')).toBe(true);
+      expect(await db.kv.get('to_delete')).toBeNull();
     });
 
-    test('list', async () => {
-      await db.kvPut('user:1', 'alice');
-      await db.kvPut('user:2', 'bob');
-      await db.kvPut('item:1', 'book');
-
-      const allKeys = await db.kvList();
+    test('keys without options', async () => {
+      await db.kv.set('user:1', 'alice');
+      await db.kv.set('user:2', 'bob');
+      await db.kv.set('item:1', 'book');
+      const allKeys = await db.kv.keys();
       expect(allKeys.length).toBe(3);
+    });
 
-      const userKeys = await db.kvList('user:');
+    test('keys with prefix', async () => {
+      await db.kv.set('user:1', 'alice');
+      await db.kv.set('user:2', 'bob');
+      await db.kv.set('item:1', 'book');
+      const userKeys = await db.kv.keys({ prefix: 'user:' });
       expect(userKeys.length).toBe(2);
     });
 
-    test('put returns version number', async () => {
-      const v = await db.kvPut('vkey', 'val');
+    test('keys with limit', async () => {
+      await db.kv.set('k1', 1);
+      await db.kv.set('k2', 2);
+      await db.kv.set('k3', 3);
+      const keys = await db.kv.keys({ prefix: 'k', limit: 2 });
+      expect(keys.length).toBeLessThanOrEqual(2);
+    });
+
+    test('set returns version number', async () => {
+      const v = await db.kv.set('vkey', 'val');
       expect(typeof v).toBe('number');
       expect(v).toBeGreaterThan(0);
     });
 
     test('history', async () => {
-      await db.kvPut('hkey', 'v1');
-      await db.kvPut('hkey', 'v2');
-      const history = await db.kvHistory('hkey');
+      await db.kv.set('hkey', 'v1');
+      await db.kv.set('hkey', 'v2');
+      const history = await db.kv.history('hkey');
       expect(Array.isArray(history)).toBe(true);
       expect(history.length).toBeGreaterThanOrEqual(1);
       expect(history[0]).toHaveProperty('version');
@@ -77,77 +90,81 @@ describe('Strata', () => {
     });
 
     test('getVersioned', async () => {
-      await db.kvPut('vkey2', 'val');
-      const vv = await db.kvGetVersioned('vkey2');
+      await db.kv.set('vk', 'val');
+      const vv = await db.kv.getVersioned('vk');
       expect(vv).not.toBeNull();
       expect(vv.value).toBe('val');
       expect(typeof vv.version).toBe('number');
     });
 
     test('getVersioned missing returns null', async () => {
-      expect(await db.kvGetVersioned('nope')).toBeNull();
+      expect(await db.kv.getVersioned('nope')).toBeNull();
     });
 
-    test('listPaginated', async () => {
-      await db.kvPut('p:a', 1);
-      await db.kvPut('p:b', 2);
-      await db.kvPut('p:c', 3);
-      const result = await db.kvListPaginated('p:', 2);
-      expect(result.keys).toBeDefined();
-      expect(result.keys.length).toBeLessThanOrEqual(3);
+    test('get with asOf option', async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      await db.kv.set('tt', 'v1');
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.kv.set('tt', 'v2');
+
+      expect(await db.kv.get('tt')).toBe('v2');
+      expect(await db.kv.get('tt', { asOf: ts })).toBe('v1');
     });
   });
 
   // =========================================================================
-  // State Cell
+  // State Cell — db.state
   // =========================================================================
 
-  describe('State Cell', () => {
+  describe('db.state', () => {
     test('set and get', async () => {
-      await db.stateSet('counter', 100);
-      expect(await db.stateGet('counter')).toBe(100);
+      await db.state.set('counter', 100);
+      expect(await db.state.get('counter')).toBe(100);
     });
 
     test('init', async () => {
-      await db.stateInit('status', 'pending');
-      expect(await db.stateGet('status')).toBe('pending');
+      await db.state.init('status', 'pending');
+      expect(await db.state.get('status')).toBe('pending');
     });
 
-    test('cas', async () => {
-      const version = await db.stateSet('value', 1);
-      const newVersion = await db.stateCas('value', 2, version);
+    test('cas with expectedVersion', async () => {
+      const version = await db.state.set('value', 1);
+      const newVersion = await db.state.cas('value', 2, { expectedVersion: version });
       expect(newVersion).not.toBeNull();
-      expect(await db.stateGet('value')).toBe(2);
-      // Wrong version → CAS fails
-      const result = await db.stateCas('value', 3, 999);
+      expect(await db.state.get('value')).toBe(2);
+      // Wrong version -> CAS fails
+      const result = await db.state.cas('value', 3, { expectedVersion: 999 });
       expect(result).toBeNull();
     });
 
     test('history', async () => {
-      await db.stateSet('hcell', 'a');
-      await db.stateSet('hcell', 'b');
-      const history = await db.stateHistory('hcell');
+      await db.state.set('hcell', 'a');
+      await db.state.set('hcell', 'b');
+      const history = await db.state.history('hcell');
       expect(Array.isArray(history)).toBe(true);
       expect(history.length).toBeGreaterThanOrEqual(1);
     });
 
     test('delete', async () => {
-      await db.stateSet('del_cell', 'x');
-      const deleted = await db.stateDelete('del_cell');
+      await db.state.set('del_cell', 'x');
+      const deleted = await db.state.delete('del_cell');
       expect(deleted).toBe(true);
-      expect(await db.stateGet('del_cell')).toBeNull();
+      expect(await db.state.get('del_cell')).toBeNull();
     });
 
-    test('list', async () => {
-      await db.stateSet('cell_a', 1);
-      await db.stateSet('cell_b', 2);
-      const cells = await db.stateList('cell_');
+    test('keys with prefix', async () => {
+      await db.state.set('cell_a', 1);
+      await db.state.set('cell_b', 2);
+      const cells = await db.state.keys({ prefix: 'cell_' });
       expect(cells.length).toBe(2);
     });
 
     test('getVersioned', async () => {
-      await db.stateSet('vcell', 42);
-      const vv = await db.stateGetVersioned('vcell');
+      await db.state.set('vcell', 42);
+      const vv = await db.state.getVersioned('vcell');
       expect(vv).not.toBeNull();
       expect(vv.value).toBe(42);
       expect(typeof vv.version).toBe('number');
@@ -155,129 +172,137 @@ describe('Strata', () => {
   });
 
   // =========================================================================
-  // Event Log
+  // Event Log — db.events
   // =========================================================================
 
-  describe('Event Log', () => {
+  describe('db.events', () => {
     test('append and get', async () => {
-      await db.eventAppend('user_action', { action: 'click', target: 'button' });
-      expect(await db.eventLen()).toBe(1);
+      await db.events.append('user_action', { action: 'click', target: 'button' });
+      expect(await db.events.count()).toBe(1);
 
-      const event = await db.eventGet(0);
+      const event = await db.events.get(0);
       expect(event).not.toBeNull();
       expect(event.value.action).toBe('click');
     });
 
     test('list by type', async () => {
-      await db.eventAppend('click', { x: 10 });
-      await db.eventAppend('scroll', { y: 100 });
-      await db.eventAppend('click', { x: 20 });
+      await db.events.append('click', { x: 10 });
+      await db.events.append('scroll', { y: 100 });
+      await db.events.append('click', { x: 20 });
 
-      const clicks = await db.eventList('click');
+      const clicks = await db.events.list('click');
       expect(clicks.length).toBe(2);
     });
 
-    test('eventLen', async () => {
-      expect(await db.eventLen()).toBe(0);
-      await db.eventAppend('a', {});
-      await db.eventAppend('b', {});
-      expect(await db.eventLen()).toBe(2);
+    test('count', async () => {
+      expect(await db.events.count()).toBe(0);
+      await db.events.append('a', {});
+      await db.events.append('b', {});
+      expect(await db.events.count()).toBe(2);
     });
 
-    test('listPaginated', async () => {
-      await db.eventAppend('page', { n: 1 });
-      await db.eventAppend('page', { n: 2 });
-      await db.eventAppend('page', { n: 3 });
-      const events = await db.eventListPaginated('page', 2);
+    test('list with limit', async () => {
+      await db.events.append('page', { n: 1 });
+      await db.events.append('page', { n: 2 });
+      await db.events.append('page', { n: 3 });
+      const events = await db.events.list('page', { limit: 2 });
       expect(Array.isArray(events)).toBe(true);
       expect(events.length).toBeLessThanOrEqual(3);
     });
   });
 
   // =========================================================================
-  // JSON Store
+  // JSON Store — db.json
   // =========================================================================
 
-  describe('JSON Store', () => {
+  describe('db.json', () => {
     test('set and get', async () => {
-      await db.jsonSet('config', '$', { theme: 'dark', lang: 'en' });
-      const result = await db.jsonGet('config', '$');
+      await db.json.set('config', '$', { theme: 'dark', lang: 'en' });
+      const result = await db.json.get('config', '$');
       expect(result.theme).toBe('dark');
     });
 
     test('get path', async () => {
-      await db.jsonSet('config', '$', { theme: 'dark', lang: 'en' });
-      const theme = await db.jsonGet('config', '$.theme');
+      await db.json.set('config', '$', { theme: 'dark', lang: 'en' });
+      const theme = await db.json.get('config', '$.theme');
       expect(theme).toBe('dark');
     });
 
-    test('list', async () => {
-      await db.jsonSet('doc1', '$', { a: 1 });
-      await db.jsonSet('doc2', '$', { b: 2 });
-      const result = await db.jsonList(100);
+    test('keys', async () => {
+      await db.json.set('doc1', '$', { a: 1 });
+      await db.json.set('doc2', '$', { b: 2 });
+      const result = await db.json.keys();
+      expect(result.keys.length).toBe(2);
+    });
+
+    test('keys with options', async () => {
+      await db.json.set('pre_a', '$', { a: 1 });
+      await db.json.set('pre_b', '$', { b: 2 });
+      await db.json.set('other', '$', { c: 3 });
+      const result = await db.json.keys({ prefix: 'pre_', limit: 10 });
       expect(result.keys.length).toBe(2);
     });
 
     test('history', async () => {
-      await db.jsonSet('jhist', '$', { v: 1 });
-      await db.jsonSet('jhist', '$', { v: 2 });
-      const history = await db.jsonHistory('jhist');
+      await db.json.set('jhist', '$', { v: 1 });
+      await db.json.set('jhist', '$', { v: 2 });
+      const history = await db.json.history('jhist');
       expect(Array.isArray(history)).toBe(true);
       expect(history.length).toBeGreaterThanOrEqual(1);
     });
 
     test('delete', async () => {
-      await db.jsonSet('jdel', '$', { x: 1 });
-      const version = await db.jsonDelete('jdel', '$');
+      await db.json.set('jdel', '$', { x: 1 });
+      const version = await db.json.delete('jdel', '$');
       expect(typeof version).toBe('number');
     });
 
     test('getVersioned', async () => {
-      await db.jsonSet('jv', '$', { data: true });
-      const vv = await db.jsonGetVersioned('jv');
+      await db.json.set('jv', '$', { data: true });
+      const vv = await db.json.getVersioned('jv');
       expect(vv).not.toBeNull();
       expect(typeof vv.version).toBe('number');
     });
   });
 
   // =========================================================================
-  // Vector Store
+  // Vector Store — db.vector
   // =========================================================================
 
-  describe('Vector Store', () => {
-    test('create collection', async () => {
-      await db.vectorCreateCollection('embeddings', 4);
-      const collections = await db.vectorListCollections();
+  describe('db.vector', () => {
+    test('createCollection and listCollections', async () => {
+      await db.vector.createCollection('embeddings', { dimension: 4 });
+      const collections = await db.vector.listCollections();
       expect(collections.some((c) => c.name === 'embeddings')).toBe(true);
     });
 
     test('upsert and search', async () => {
-      await db.vectorCreateCollection('embeddings', 4);
+      await db.vector.createCollection('embeddings', { dimension: 4 });
 
       const v1 = [1.0, 0.0, 0.0, 0.0];
       const v2 = [0.0, 1.0, 0.0, 0.0];
 
-      await db.vectorUpsert('embeddings', 'v1', v1);
-      await db.vectorUpsert('embeddings', 'v2', v2);
+      await db.vector.upsert('embeddings', 'v1', v1);
+      await db.vector.upsert('embeddings', 'v2', v2);
 
-      const results = await db.vectorSearch('embeddings', v1, 2);
+      const results = await db.vector.search('embeddings', v1, { limit: 2 });
       expect(results.length).toBe(2);
       expect(results[0].key).toBe('v1');
     });
 
-    test('upsert with metadata', async () => {
-      await db.vectorCreateCollection('docs', 4);
+    test('upsert with metadata option', async () => {
+      await db.vector.createCollection('docs', { dimension: 4 });
       const vec = [1.0, 0.0, 0.0, 0.0];
-      await db.vectorUpsert('docs', 'doc1', vec, { title: 'Hello' });
+      await db.vector.upsert('docs', 'doc1', vec, { metadata: { title: 'Hello' } });
 
-      const result = await db.vectorGet('docs', 'doc1');
+      const result = await db.vector.get('docs', 'doc1');
       expect(result.metadata.title).toBe('Hello');
     });
 
     test('get', async () => {
-      await db.vectorCreateCollection('vget', 4);
-      await db.vectorUpsert('vget', 'k1', [1, 0, 0, 0]);
-      const result = await db.vectorGet('vget', 'k1');
+      await db.vector.createCollection('vget', { dimension: 4 });
+      await db.vector.upsert('vget', 'k1', [1, 0, 0, 0]);
+      const result = await db.vector.get('vget', 'k1');
       expect(result).not.toBeNull();
       expect(result.key).toBe('k1');
       expect(result.embedding.length).toBe(4);
@@ -285,34 +310,34 @@ describe('Strata', () => {
     });
 
     test('get missing returns null', async () => {
-      await db.vectorCreateCollection('vget2', 4);
-      expect(await db.vectorGet('vget2', 'nope')).toBeNull();
+      await db.vector.createCollection('vget2', { dimension: 4 });
+      expect(await db.vector.get('vget2', 'nope')).toBeNull();
     });
 
     test('delete', async () => {
-      await db.vectorCreateCollection('vdel', 4);
-      await db.vectorUpsert('vdel', 'k1', [1, 0, 0, 0]);
-      expect(await db.vectorDelete('vdel', 'k1')).toBe(true);
-      expect(await db.vectorGet('vdel', 'k1')).toBeNull();
+      await db.vector.createCollection('vdel', { dimension: 4 });
+      await db.vector.upsert('vdel', 'k1', [1, 0, 0, 0]);
+      expect(await db.vector.delete('vdel', 'k1')).toBe(true);
+      expect(await db.vector.get('vdel', 'k1')).toBeNull();
     });
 
     test('deleteCollection', async () => {
-      await db.vectorCreateCollection('to_delete', 4);
-      expect(await db.vectorDeleteCollection('to_delete')).toBe(true);
+      await db.vector.createCollection('to_delete', { dimension: 4 });
+      expect(await db.vector.deleteCollection('to_delete')).toBe(true);
     });
 
-    test('collectionStats', async () => {
-      await db.vectorCreateCollection('stats', 4);
-      await db.vectorUpsert('stats', 'k1', [1, 0, 0, 0]);
-      const stats = await db.vectorCollectionStats('stats');
+    test('stats', async () => {
+      await db.vector.createCollection('stats', { dimension: 4 });
+      await db.vector.upsert('stats', 'k1', [1, 0, 0, 0]);
+      const stats = await db.vector.stats('stats');
       expect(stats.name).toBe('stats');
       expect(stats.dimension).toBe(4);
       expect(stats.count).toBeGreaterThanOrEqual(1);
     });
 
     test('batchUpsert', async () => {
-      await db.vectorCreateCollection('batch', 4);
-      const versions = await db.vectorBatchUpsert('batch', [
+      await db.vector.createCollection('batch', { dimension: 4 });
+      const versions = await db.vector.batchUpsert('batch', [
         { key: 'b1', vector: [1, 0, 0, 0] },
         { key: 'b2', vector: [0, 1, 0, 0], metadata: { label: 'two' } },
       ]);
@@ -320,143 +345,151 @@ describe('Strata', () => {
       versions.forEach((v) => expect(typeof v).toBe('number'));
     });
 
-    test('rejects NaN in vector', async () => {
-      await db.vectorCreateCollection('nan_test', 4);
-      await expect(
-        db.vectorUpsert('nan_test', 'k', [1, NaN, 0, 0]),
-      ).rejects.toThrow(/not a finite number/);
+    test('search with filter', async () => {
+      await db.vector.createCollection('vf', { dimension: 4 });
+      await db.vector.upsert('vf', 'k1', [1, 0, 0, 0], { metadata: { category: 'a' } });
+      await db.vector.upsert('vf', 'k2', [0, 1, 0, 0], { metadata: { category: 'b' } });
+      const results = await db.vector.search('vf', [1, 0, 0, 0], {
+        limit: 10,
+        filter: [{ field: 'category', op: 'eq', value: 'a' }],
+      });
+      expect(results.length).toBe(1);
+      expect(results[0].key).toBe('k1');
     });
 
-    test('rejects Infinity in vector', async () => {
-      await db.vectorCreateCollection('inf_test', 4);
+    test('rejects non-finite vector values', async () => {
+      await db.vector.createCollection('finite_test', { dimension: 4 });
       await expect(
-        db.vectorUpsert('inf_test', 'k', [1, 0, Infinity, 0]),
+        db.vector.upsert('finite_test', 'k', [1, NaN, 0, 0]),
+      ).rejects.toThrow(/not a finite number/);
+      await expect(
+        db.vector.upsert('finite_test', 'k', [1, 0, Infinity, 0]),
       ).rejects.toThrow(/not a finite number/);
     });
   });
 
   // =========================================================================
-  // Branches
+  // Branches — db.branch
   // =========================================================================
 
-  describe('Branches', () => {
-    test('create and list', async () => {
-      await db.createBranch('feature');
-      const branches = await db.listBranches();
+  describe('db.branch', () => {
+    test('current', async () => {
+      expect(await db.branch.current()).toBe('default');
+    });
+
+    test('create, list, exists', async () => {
+      await db.branch.create('feature');
+      const branches = await db.branch.list();
       expect(branches).toContain('default');
       expect(branches).toContain('feature');
+      expect(await db.branch.exists('feature')).toBe(true);
     });
 
     test('switch', async () => {
-      await db.kvPut('x', 1);
-      await db.createBranch('feature');
-      await db.setBranch('feature');
+      await db.kv.set('x', 1);
+      await db.branch.create('feature');
+      await db.branch.switch('feature');
 
-      expect(await db.kvGet('x')).toBeNull();
+      expect(await db.kv.get('x')).toBeNull();
 
-      await db.kvPut('x', 2);
-      await db.setBranch('default');
-      expect(await db.kvGet('x')).toBe(1);
+      await db.kv.set('x', 2);
+      await db.branch.switch('default');
+      expect(await db.kv.get('x')).toBe(1);
     });
 
     test('fork', async () => {
-      await db.kvPut('shared', 'original');
-      const result = await db.forkBranch('forked');
+      await db.kv.set('shared', 'original');
+      const result = await db.branch.fork('forked');
       expect(result.keysCopied).toBeGreaterThan(0);
 
-      await db.setBranch('forked');
-      expect(await db.kvGet('shared')).toBe('original');
+      await db.branch.switch('forked');
+      expect(await db.kv.get('shared')).toBe('original');
     });
 
-    test('current branch', async () => {
-      expect(await db.currentBranch()).toBe('default');
-      await db.createBranch('test');
-      await db.setBranch('test');
-      expect(await db.currentBranch()).toBe('test');
-    });
-
-    test('deleteBranch', async () => {
-      await db.createBranch('to_del');
-      await db.deleteBranch('to_del');
-      const branches = await db.listBranches();
+    test('delete', async () => {
+      await db.branch.create('to_del');
+      await db.branch.delete('to_del');
+      const branches = await db.branch.list();
       expect(branches).not.toContain('to_del');
     });
 
-    test('branchExists', async () => {
-      expect(await db.branchExists('default')).toBe(true);
-      expect(await db.branchExists('nope')).toBe(false);
+    test('exists returns false for missing', async () => {
+      expect(await db.branch.exists('nope')).toBe(false);
     });
 
-    test('branchGet', async () => {
-      const info = await db.branchGet('default');
+    test('get', async () => {
+      const info = await db.branch.get('default');
       expect(info).not.toBeNull();
       expect(info.id).toBe('default');
       expect(info).toHaveProperty('status');
       expect(info).toHaveProperty('version');
     });
 
-    test('branchGet missing returns null', async () => {
-      expect(await db.branchGet('nonexistent')).toBeNull();
+    test('get missing returns null', async () => {
+      expect(await db.branch.get('nonexistent')).toBeNull();
     });
 
-    test('diffBranches', async () => {
-      await db.kvPut('d_key', 'val');
-      await db.createBranch('diff_b');
-      const diff = await db.diffBranches('default', 'diff_b');
+    test('diff', async () => {
+      await db.kv.set('d_key', 'val');
+      await db.branch.create('diff_b');
+      const diff = await db.branch.diff('default', 'diff_b');
       expect(diff).toHaveProperty('summary');
       expect(diff.summary).toHaveProperty('totalAdded');
     });
 
-    test('mergeBranches', async () => {
-      await db.kvPut('base', 'val');
-      await db.forkBranch('merge_src');
-      await db.setBranch('merge_src');
-      await db.kvPut('new_key', 'from_src');
-      await db.setBranch('default');
-      const result = await db.mergeBranches('merge_src');
-      expect(result).toHaveProperty('keysApplied');
+    test('merge with and without strategy option', async () => {
+      await db.kv.set('base', 'val');
+      await db.branch.fork('merge_src');
+      await db.branch.switch('merge_src');
+      await db.kv.set('new_key', 'from_src');
+      await db.branch.switch('default');
+      const r1 = await db.branch.merge('merge_src');
+      expect(r1).toHaveProperty('keysApplied');
+
+      await db.branch.fork('merge_src2');
+      await db.branch.switch('merge_src2');
+      await db.kv.set('key2', 'from_src');
+      await db.branch.switch('default');
+      const r2 = await db.branch.merge('merge_src2', { strategy: 'last_writer_wins' });
+      expect(r2).toHaveProperty('keysApplied');
     });
   });
 
   // =========================================================================
-  // Spaces
+  // Spaces — db.space
   // =========================================================================
 
-  describe('Spaces', () => {
-    test('list spaces', async () => {
-      const spaces = await db.listSpaces();
+  describe('db.space', () => {
+    test('current', async () => {
+      expect(await db.space.current()).toBe('default');
+    });
+
+    test('create, list, exists', async () => {
+      await db.space.create('ns');
+      const spaces = await db.space.list();
       expect(spaces).toContain('default');
+      expect(spaces).toContain('ns');
+      expect(await db.space.exists('ns')).toBe(true);
     });
 
-    test('switch space', async () => {
-      await db.kvPut('key', 'value1');
-      await db.setSpace('other');
-      expect(await db.kvGet('key')).toBeNull();
+    test('switch', async () => {
+      await db.kv.set('key', 'value1');
+      await db.space.switch('other');
+      expect(await db.kv.get('key')).toBeNull();
 
-      await db.kvPut('key', 'value2');
-      await db.setSpace('default');
-      expect(await db.kvGet('key')).toBe('value1');
+      await db.kv.set('key', 'value2');
+      await db.space.switch('default');
+      expect(await db.kv.get('key')).toBe('value1');
     });
 
-    test('current space', async () => {
-      expect(await db.currentSpace()).toBe('default');
+    test('exists returns false for missing', async () => {
+      expect(await db.space.exists('nonexistent_space')).toBe(false);
     });
 
-    test('spaceCreate', async () => {
-      await db.spaceCreate('explicit');
-      const exists = await db.spaceExists('explicit');
-      expect(exists).toBe(true);
-    });
-
-    test('spaceExists', async () => {
-      expect(await db.spaceExists('default')).toBe(true);
-      expect(await db.spaceExists('nonexistent_space')).toBe(false);
-    });
-
-    test('deleteSpace', async () => {
-      await db.spaceCreate('to_del_space');
-      await db.deleteSpaceForce('to_del_space');
-      expect(await db.spaceExists('to_del_space')).toBe(false);
+    test('delete with force', async () => {
+      await db.space.create('to_del_space');
+      await db.space.delete('to_del_space', { force: true });
+      expect(await db.space.exists('to_del_space')).toBe(false);
     });
   });
 
@@ -478,12 +511,10 @@ describe('Strata', () => {
 
     test('flush', async () => {
       await db.flush();
-      // No error means success
     });
 
     test('compact', async () => {
       await db.compact();
-      // No error means success
     });
   });
 
@@ -510,7 +541,6 @@ describe('Strata', () => {
     });
 
     test('txnInfo', async () => {
-      // Before any txn, info should be null
       expect(await db.txnInfo()).toBeNull();
       await db.begin();
       const info = await db.txnInfo();
@@ -527,241 +557,8 @@ describe('Strata', () => {
 
   describe('Retention', () => {
     test('retentionApply succeeds', async () => {
-      await db.kvPut('r_key', 'val');
+      await db.kv.set('r_key', 'val');
       await db.retentionApply();
-      // No error means success
-    });
-  });
-
-  // =========================================================================
-  // Time Travel
-  // =========================================================================
-
-  describe('Time Travel', () => {
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-    test('kvGet with asOf returns past value', async () => {
-      await db.kvPut('tt_kv', 'v1');
-      await sleep(50);
-      const range = await db.timeRange();
-      const ts = range.latestTs;
-      await sleep(50);
-      await db.kvPut('tt_kv', 'v2');
-
-      expect(await db.kvGet('tt_kv')).toBe('v2');
-      expect(await db.kvGet('tt_kv', ts)).toBe('v1');
-    });
-
-    test('kvGet with asOf before creation returns null', async () => {
-      const range = await db.timeRange();
-      // Use timestamp 1 (before any writes)
-      const earlyTs = 1;
-      await db.kvPut('tt_kv_early', 'val');
-      expect(await db.kvGet('tt_kv_early', earlyTs)).toBeNull();
-    });
-
-    test('kvList with asOf returns fewer keys', async () => {
-      await db.kvPut('ttl_a', 1);
-      await sleep(50);
-      const range = await db.timeRange();
-      const ts = range.latestTs;
-      await sleep(50);
-      await db.kvPut('ttl_b', 2);
-
-      const current = await db.kvList('ttl_');
-      expect(current.length).toBe(2);
-      const past = await db.kvList('ttl_', ts);
-      expect(past.length).toBe(1);
-    });
-
-    test('stateGet with asOf returns past value', async () => {
-      await db.stateSet('tt_state', 'old');
-      await sleep(50);
-      const range = await db.timeRange();
-      const ts = range.latestTs;
-      await sleep(50);
-      await db.stateSet('tt_state', 'new');
-
-      expect(await db.stateGet('tt_state')).toBe('new');
-      expect(await db.stateGet('tt_state', ts)).toBe('old');
-    });
-
-    test('stateList with asOf', async () => {
-      await db.stateSet('tts_a', 1);
-      await sleep(50);
-      const range = await db.timeRange();
-      const ts = range.latestTs;
-      await sleep(50);
-      await db.stateSet('tts_b', 2);
-
-      const current = await db.stateList('tts_');
-      expect(current.length).toBe(2);
-      const past = await db.stateList('tts_', ts);
-      expect(past.length).toBe(1);
-    });
-
-    test('eventGet with asOf', async () => {
-      await db.eventAppend('tt_evt', { v: 1 });
-      // Event sequence is 0 (first event in fresh db)
-      const evt = await db.eventGet(0);
-      expect(evt).not.toBeNull();
-      expect(evt.value.v).toBe(1);
-      // The event timestamp is its creation time
-      const eventTs = evt.timestamp;
-
-      await sleep(50);
-      // asOf at the event timestamp should return it
-      const past = await db.eventGet(0, eventTs);
-      expect(past).not.toBeNull();
-
-      // asOf before the event was created should return null
-      const before = await db.eventGet(0, 1);
-      expect(before).toBeNull();
-    });
-
-    test('eventList with asOf', async () => {
-      await db.eventAppend('tt_etype', { n: 1 });
-      await sleep(50);
-      const range = await db.timeRange();
-      const ts = range.latestTs;
-      await sleep(50);
-      await db.eventAppend('tt_etype', { n: 2 });
-
-      const current = await db.eventList('tt_etype');
-      expect(current.length).toBe(2);
-      const past = await db.eventList('tt_etype', ts);
-      expect(past.length).toBe(1);
-    });
-
-    test('jsonGet with asOf returns past value', async () => {
-      await db.jsonSet('tt_json', '$', { v: 1 });
-      await sleep(50);
-      const range = await db.timeRange();
-      const ts = range.latestTs;
-      await sleep(50);
-      await db.jsonSet('tt_json', '$', { v: 2 });
-
-      const current = await db.jsonGet('tt_json', '$');
-      expect(current.v).toBe(2);
-      const past = await db.jsonGet('tt_json', '$', ts);
-      expect(past.v).toBe(1);
-    });
-
-    test('jsonList with asOf', async () => {
-      await db.jsonSet('ttj_a', '$', { x: 1 });
-      await sleep(50);
-      const range = await db.timeRange();
-      const ts = range.latestTs;
-      await sleep(50);
-      await db.jsonSet('ttj_b', '$', { x: 2 });
-
-      const current = await db.jsonList(100, 'ttj_');
-      expect(current.keys.length).toBe(2);
-      const past = await db.jsonList(100, 'ttj_', undefined, ts);
-      expect(past.keys.length).toBe(1);
-    });
-
-    test('vectorSearch with asOf', async () => {
-      await db.vectorCreateCollection('tt_vec', 4);
-      await db.vectorUpsert('tt_vec', 'a', [1, 0, 0, 0]);
-      await sleep(50);
-      const range = await db.timeRange();
-      const ts = range.latestTs;
-      await sleep(50);
-      await db.vectorUpsert('tt_vec', 'b', [0, 1, 0, 0]);
-
-      const current = await db.vectorSearch('tt_vec', [1, 0, 0, 0], 10);
-      expect(current.length).toBe(2);
-      const past = await db.vectorSearch('tt_vec', [1, 0, 0, 0], 10, ts);
-      expect(past.length).toBe(1);
-    });
-
-    test('vectorGet with asOf', async () => {
-      await db.vectorCreateCollection('tt_vget', 4);
-      await db.vectorUpsert('tt_vget', 'k', [1, 0, 0, 0], { tag: 'v1' });
-      await sleep(50);
-      const range = await db.timeRange();
-      const ts = range.latestTs;
-      await sleep(50);
-      await db.vectorUpsert('tt_vget', 'k', [0, 1, 0, 0], { tag: 'v2' });
-
-      const current = await db.vectorGet('tt_vget', 'k');
-      expect(current.metadata.tag).toBe('v2');
-      const past = await db.vectorGet('tt_vget', 'k', ts);
-      expect(past).not.toBeNull();
-      expect(past.metadata.tag).toBe('v1');
-    });
-
-    test('timeRange returns oldest and latest', async () => {
-      await db.kvPut('tr_key', 'val');
-      const range = await db.timeRange();
-      expect(range).toHaveProperty('oldestTs');
-      expect(range).toHaveProperty('latestTs');
-      expect(typeof range.oldestTs).toBe('number');
-      expect(typeof range.latestTs).toBe('number');
-      expect(range.latestTs).toBeGreaterThanOrEqual(range.oldestTs);
-    });
-  });
-
-  // =========================================================================
-  // Errors
-  // =========================================================================
-
-  describe('Errors', () => {
-    test('NotFoundError on missing collection', async () => {
-      try {
-        await db.vectorSearch('no_such_collection', [1, 0, 0, 0], 1);
-        fail('Expected error');
-      } catch (err) {
-        expect(err).toBeInstanceOf(NotFoundError);
-        expect(err).toBeInstanceOf(StrataError);
-        expect(err.code).toBe('NOT_FOUND');
-      }
-    });
-
-    test('ValidationError on invalid metric', async () => {
-      try {
-        await db.vectorCreateCollection('x', 4, 'invalid_metric');
-        fail('Expected error');
-      } catch (err) {
-        expect(err).toBeInstanceOf(ValidationError);
-        expect(err.code).toBe('VALIDATION');
-      }
-    });
-
-    test('ConstraintError on dimension mismatch', async () => {
-      await db.vectorCreateCollection('dim_test', 4);
-      try {
-        await db.vectorUpsert('dim_test', 'k', [1, 0]); // wrong dimension
-        fail('Expected error');
-      } catch (err) {
-        expect(err).toBeInstanceOf(ConstraintError);
-        expect(err.code).toBe('CONSTRAINT');
-      }
-    });
-
-    test('error hierarchy — instanceof checks', async () => {
-      try {
-        await db.vectorSearch('no_such', [1, 0, 0, 0], 1);
-        fail('Expected error');
-      } catch (err) {
-        expect(err instanceof NotFoundError).toBe(true);
-        expect(err instanceof StrataError).toBe(true);
-        expect(err instanceof Error).toBe(true);
-        // Not other types
-        expect(err instanceof ValidationError).toBe(false);
-        expect(err instanceof ConflictError).toBe(false);
-      }
-    });
-
-    test('StrataError has code property', async () => {
-      try {
-        await db.vectorSearch('missing', [1, 0, 0, 0], 1);
-        fail('Expected error');
-      } catch (err) {
-        expect(err.code).toBeDefined();
-        expect(typeof err.code).toBe('string');
-      }
     });
   });
 
@@ -771,9 +568,286 @@ describe('Strata', () => {
 
   describe('Search', () => {
     test('cross-primitive search returns array', async () => {
-      await db.kvPut('search_key', 'hello world');
+      await db.kv.set('search_key', 'hello world');
       const results = await db.search('hello');
       expect(Array.isArray(results)).toBe(true);
+    });
+  });
+
+  // =========================================================================
+  // Snapshot API — db.at(timestamp)
+  // =========================================================================
+
+  describe('db.at()', () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    test('kv.get reads at snapshot time', async () => {
+      await db.kv.set('snap_kv', 'v1');
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.kv.set('snap_kv', 'v2');
+
+      const snapshot = db.at(ts);
+      expect(await snapshot.kv.get('snap_kv')).toBe('v1');
+      expect(await db.kv.get('snap_kv')).toBe('v2');
+    });
+
+    test('kv.keys reads at snapshot time', async () => {
+      await db.kv.set('sk_a', 1);
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.kv.set('sk_b', 2);
+
+      const snapshot = db.at(ts);
+      const past = await snapshot.kv.keys({ prefix: 'sk_' });
+      expect(past.length).toBe(1);
+    });
+
+    test('snapshot write throws StateError', () => {
+      const snapshot = db.at(12345);
+      expect(() => snapshot.kv.set('k', 'v')).toThrow(StateError);
+      expect(() => snapshot.kv.delete('k')).toThrow(StateError);
+      expect(() => snapshot.state.set('c', 'v')).toThrow(StateError);
+      expect(() => snapshot.state.init('c', 'v')).toThrow(StateError);
+      expect(() => snapshot.state.cas('c', 'v')).toThrow(StateError);
+      expect(() => snapshot.state.delete('c')).toThrow(StateError);
+      expect(() => snapshot.events.append('t', {})).toThrow(StateError);
+      expect(() => snapshot.json.set('k', '$', {})).toThrow(StateError);
+      expect(() => snapshot.json.delete('k', '$')).toThrow(StateError);
+      expect(() => snapshot.vector.createCollection('c', {})).toThrow(StateError);
+      expect(() => snapshot.vector.deleteCollection('c')).toThrow(StateError);
+      expect(() => snapshot.vector.upsert('c', 'k', [])).toThrow(StateError);
+      expect(() => snapshot.vector.delete('c', 'k')).toThrow(StateError);
+      expect(() => snapshot.vector.batchUpsert('c', [])).toThrow(StateError);
+    });
+
+    test('state.get reads at snapshot time', async () => {
+      await db.state.set('snap_state', 'old');
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.state.set('snap_state', 'new');
+
+      const snapshot = db.at(ts);
+      expect(await snapshot.state.get('snap_state')).toBe('old');
+    });
+
+    test('state.keys reads at snapshot time', async () => {
+      await db.state.set('tts_a', 1);
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.state.set('tts_b', 2);
+
+      const snapshot = db.at(ts);
+      const past = await snapshot.state.keys({ prefix: 'tts_' });
+      expect(past.length).toBe(1);
+    });
+
+    test('events.get reads at snapshot time', async () => {
+      await db.events.append('snap_evt', { v: 1 });
+      const evt = await db.events.get(0);
+      const eventTs = evt.timestamp;
+
+      const snapshot = db.at(eventTs);
+      const past = await snapshot.events.get(0);
+      expect(past).not.toBeNull();
+
+      const early = db.at(1);
+      const before = await early.events.get(0);
+      expect(before).toBeNull();
+    });
+
+    test('events.list reads at snapshot time', async () => {
+      await db.events.append('tt_etype', { n: 1 });
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.events.append('tt_etype', { n: 2 });
+
+      const current = await db.events.list('tt_etype');
+      expect(current.length).toBe(2);
+      const snapshot = db.at(ts);
+      const past = await snapshot.events.list('tt_etype');
+      expect(past.length).toBe(1);
+    });
+
+    test('json.get reads at snapshot time', async () => {
+      await db.json.set('snap_json', '$', { v: 1 });
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.json.set('snap_json', '$', { v: 2 });
+
+      const snapshot = db.at(ts);
+      const val = await snapshot.json.get('snap_json', '$');
+      expect(val.v).toBe(1);
+    });
+
+    test('json.keys reads at snapshot time', async () => {
+      await db.json.set('ttj_a', '$', { x: 1 });
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.json.set('ttj_b', '$', { x: 2 });
+
+      const snapshot = db.at(ts);
+      const past = await snapshot.json.keys({ prefix: 'ttj_' });
+      expect(past.keys.length).toBe(1);
+    });
+
+    test('vector.search reads at snapshot time', async () => {
+      await db.vector.createCollection('snap_vec', { dimension: 4 });
+      await db.vector.upsert('snap_vec', 'a', [1, 0, 0, 0]);
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.vector.upsert('snap_vec', 'b', [0, 1, 0, 0]);
+
+      const snapshot = db.at(ts);
+      const results = await snapshot.vector.search('snap_vec', [1, 0, 0, 0], { limit: 10 });
+      expect(results.length).toBe(1);
+    });
+
+    test('vector.get reads at snapshot time', async () => {
+      await db.vector.createCollection('tt_vget', { dimension: 4 });
+      await db.vector.upsert('tt_vget', 'k', [1, 0, 0, 0], { metadata: { tag: 'v1' } });
+      await sleep(50);
+      const range = await db.timeRange();
+      const ts = range.latestTs;
+      await sleep(50);
+      await db.vector.upsert('tt_vget', 'k', [0, 1, 0, 0], { metadata: { tag: 'v2' } });
+
+      const current = await db.vector.get('tt_vget', 'k');
+      expect(current.metadata.tag).toBe('v2');
+      const snapshot = db.at(ts);
+      const past = await snapshot.vector.get('tt_vget', 'k');
+      expect(past).not.toBeNull();
+      expect(past.metadata.tag).toBe('v1');
+    });
+
+    test('timeRange returns oldest and latest', async () => {
+      await db.kv.set('tr_key', 'val');
+      const range = await db.timeRange();
+      expect(range).toHaveProperty('oldestTs');
+      expect(range).toHaveProperty('latestTs');
+      expect(typeof range.oldestTs).toBe('number');
+      expect(typeof range.latestTs).toBe('number');
+      expect(range.latestTs).toBeGreaterThanOrEqual(range.oldestTs);
+    });
+
+    test('StrataSnapshot is exported', () => {
+      expect(StrataSnapshot).toBeDefined();
+      const snapshot = db.at(12345);
+      expect(snapshot).toBeInstanceOf(StrataSnapshot);
+    });
+  });
+
+  // =========================================================================
+  // Transaction callback — db.transaction()
+  // =========================================================================
+
+  describe('db.transaction()', () => {
+    test('auto-commits on success', async () => {
+      await db.kv.set('pre', 'before');
+      await db.transaction(async (tx) => {
+        await tx.kv.set('tx_key', 'tx_value');
+      });
+      expect(await db.kv.get('tx_key')).toBe('tx_value');
+    });
+
+    test('auto-rollback on error', async () => {
+      await expect(
+        db.transaction(async (tx) => {
+          throw new Error('intentional');
+        }),
+      ).rejects.toThrow('intentional');
+      // After rollback, no transaction should be active
+      expect(await db.txnIsActive()).toBe(false);
+    });
+
+    test('returns result from callback', async () => {
+      const result = await db.transaction(async (tx) => {
+        await tx.kv.set('r_key', 'r_val');
+        return 42;
+      });
+      expect(result).toBe(42);
+    });
+
+    test('read-only transaction', async () => {
+      await db.kv.set('ro_key', 'ro_val');
+      const result = await db.transaction(
+        async (tx) => {
+          const val = await tx.kv.get('ro_key');
+          return val;
+        },
+        { readOnly: true },
+      );
+      expect(result).toBe('ro_val');
+    });
+  });
+
+  // =========================================================================
+  // Errors
+  // =========================================================================
+
+  describe('Errors', () => {
+    test('NotFoundError with correct hierarchy and code', async () => {
+      try {
+        await db.vector.search('no_such_collection', [1, 0, 0, 0], { limit: 1 });
+        fail('Expected error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(NotFoundError);
+        expect(err).toBeInstanceOf(StrataError);
+        expect(err).toBeInstanceOf(Error);
+        expect(err.code).toBe('NOT_FOUND');
+        // negative checks — not other subclasses
+        expect(err instanceof ValidationError).toBe(false);
+        expect(err instanceof ConflictError).toBe(false);
+      }
+    });
+
+    test('ValidationError on invalid metric', async () => {
+      try {
+        await db.vector.createCollection('x', { dimension: 4, metric: 'invalid_metric' });
+        fail('Expected error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ValidationError);
+        expect(err.code).toBe('VALIDATION');
+      }
+    });
+
+    test('ConstraintError on dimension mismatch', async () => {
+      await db.vector.createCollection('dim_test', { dimension: 4 });
+      try {
+        await db.vector.upsert('dim_test', 'k', [1, 0]); // wrong dimension
+        fail('Expected error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConstraintError);
+        expect(err.code).toBe('CONSTRAINT');
+      }
+    });
+  });
+
+  // =========================================================================
+  // Close lifecycle
+  // =========================================================================
+
+  describe('db.close()', () => {
+    test('close resolves without error', async () => {
+      const tempDb = Strata.cache();
+      await tempDb.kv.set('k', 'v');
+      await tempDb.close();
     });
   });
 });

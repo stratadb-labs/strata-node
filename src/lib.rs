@@ -1904,6 +1904,38 @@ impl Strata {
     }
 
     // =========================================================================
+    // Lifecycle
+    // =========================================================================
+
+    /// Close the database, releasing all resources.
+    ///
+    /// After calling `close()`, any further method call on this instance will
+    /// fail with a "Lock poisoned" or similar error.  This mirrors the
+    /// `client.close()` pattern used by every major Node.js database driver.
+    #[napi]
+    pub async fn close(&self) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        let session_arc = self.session.clone();
+        tokio::task::spawn_blocking(move || {
+            // Drop session first (it borrows the inner DB).
+            {
+                let mut s = lock_session(&session_arc)?;
+                *s = None;
+            }
+            // Replace the inner Strata with a freshly-opened cache that will
+            // be immediately dropped, effectively releasing the original DB.
+            let mut guard = inner
+                .lock()
+                .map_err(|_| napi::Error::from_reason("Lock poisoned"))?;
+            let placeholder = RustStrata::cache().map_err(to_napi_err)?;
+            *guard = placeholder;
+            Ok(())
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
     // Time Travel
     // =========================================================================
 

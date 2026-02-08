@@ -164,6 +164,14 @@ export declare class Strata {
   search(query: string, k?: number | undefined | null, primitives?: Array<string> | undefined | null): Promise<any>
   /** Apply retention policy to trigger garbage collection. */
   retentionApply(): Promise<void>
+  /**
+   * Close the database, releasing all resources.
+   *
+   * After calling `close()`, any further method call on this instance will
+   * fail with a "Lock poisoned" or similar error.  This mirrors the
+   * `client.close()` pattern used by every major Node.js database driver.
+   */
+  close(): Promise<void>
   /** Get the time range (oldest and latest timestamps) for the current branch. */
   timeRange(): Promise<any>
 }
