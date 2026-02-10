@@ -113,6 +113,15 @@ describe('Strata', () => {
       expect(await db.kv.get('tt')).toBe('v2');
       expect(await db.kv.get('tt', { asOf: ts })).toBe('v1');
     });
+
+    test('getVersioned timestamp roundtrip with asOf', async () => {
+      await db.kv.set('kv_rt', 'v1');
+      const vv = await db.kv.getVersioned('kv_rt');
+      await db.kv.set('kv_rt', 'v2');
+
+      expect(await db.kv.get('kv_rt')).toBe('v2');
+      expect(await db.kv.get('kv_rt', { asOf: vv.timestamp })).toBe('v1');
+    });
   });
 
   // =========================================================================
@@ -168,6 +177,15 @@ describe('Strata', () => {
       expect(vv).not.toBeNull();
       expect(vv.value).toBe(42);
       expect(typeof vv.version).toBe('number');
+    });
+
+    test('getVersioned timestamp roundtrip with asOf', async () => {
+      await db.state.set('sv_rt', 'v1');
+      const vv = await db.state.getVersioned('sv_rt');
+      await db.state.set('sv_rt', 'v2');
+
+      expect(await db.state.get('sv_rt')).toBe('v2');
+      expect(await db.state.get('sv_rt', { asOf: vv.timestamp })).toBe('v1');
     });
   });
 
@@ -262,6 +280,17 @@ describe('Strata', () => {
       const vv = await db.json.getVersioned('jv');
       expect(vv).not.toBeNull();
       expect(typeof vv.version).toBe('number');
+    });
+
+    test('getVersioned timestamp roundtrip with asOf', async () => {
+      await db.json.set('jv_rt', '$', { v: 1 });
+      const vv = await db.json.getVersioned('jv_rt');
+      await db.json.set('jv_rt', '$', { v: 2 });
+
+      const current = await db.json.get('jv_rt', '$');
+      expect(current.v).toBe(2);
+      const past = await db.json.get('jv_rt', '$', { asOf: vv.timestamp });
+      expect(past.v).toBe(1);
     });
   });
 
