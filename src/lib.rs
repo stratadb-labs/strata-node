@@ -11,8 +11,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use stratadb::{
-    AccessMode, BatchVectorEntry, BranchExportResult, BranchId, BranchImportResult,
+    AccessMode, BatchEventEntry, BatchGetItemResult, BatchItemResult, BatchJsonDeleteEntry,
+    BatchJsonEntry, BatchJsonGetEntry, BatchKvEntry, BatchStateEntry, BatchVectorEntry,
+    BranchExportResult, BranchId, BranchImportResult, BulkGraphEdge, BulkGraphNode,
     BundleValidateResult, CollectionInfo, Command, DistanceMetric, Error as StrataError, FilterOp,
+    GraphAnalyticsF64Result, GraphAnalyticsU64Result, GraphBfsResult,
     MergeStrategy, MetadataFilter, OpenOptions, Output, SearchQuery, Session,
     Strata as RustStrata, TimeRangeInput, TxnOptions, Value, VersionedBranchInfo, VersionedValue,
 };
@@ -84,14 +87,14 @@ fn js_to_value_checked(val: serde_json::Value, depth: usize) -> napi::Result<Val
             for item in arr {
                 out.push(js_to_value_checked(item, depth + 1)?);
             }
-            Ok(Value::Array(out))
+            Ok(Value::Array(Box::new(out)))
         }
         serde_json::Value::Object(map) => {
             let mut obj = HashMap::new();
             for (k, v) in map {
                 obj.insert(k, js_to_value_checked(v, depth + 1)?);
             }
-            Ok(Value::Object(obj))
+            Ok(Value::Object(Box::new(obj)))
         }
     }
 }
@@ -123,10 +126,10 @@ fn value_to_js(val: Value) -> serde_json::Value {
         Value::String(s) => serde_json::Value::String(s),
         Value::Bytes(b) => serde_json::Value::String(base64_encode(&b)),
         Value::Array(arr) => {
-            serde_json::Value::Array(arr.into_iter().map(value_to_js).collect())
+            serde_json::Value::Array((*arr).into_iter().map(value_to_js).collect())
         }
         Value::Object(map) => {
-            let obj: serde_json::Map<String, serde_json::Value> = map
+            let obj: serde_json::Map<String, serde_json::Value> = (*map)
                 .into_iter()
                 .map(|(k, v)| (k, value_to_js(v)))
                 .collect();
@@ -280,14 +283,14 @@ impl Strata {
         }
 
         let mut opts = OpenOptions::new();
-        if auto_embed {
-            opts = opts.auto_embed(true);
-        }
         if read_only {
             opts = opts.access_mode(AccessMode::ReadOnly);
         }
 
         let raw = RustStrata::open_with(&path, opts).map_err(to_napi_err)?;
+        if auto_embed {
+            raw.set_auto_embed(true).map_err(to_napi_err)?;
+        }
         Ok(Self {
             inner: Arc::new(Mutex::new(raw)),
             session: Arc::new(Mutex::new(None)),
@@ -1072,11 +1075,30 @@ impl Strata {
 
     /// Create a new empty branch.
     #[napi(js_name = "createBranch")]
-    pub async fn create_branch(&self, branch: String) -> napi::Result<()> {
+    pub async fn create_branch(
+        &self,
+        branch: String,
+        metadata: Option<serde_json::Value>,
+    ) -> napi::Result<()> {
         let inner = self.inner.clone();
+        let meta_val = metadata
+            .map(|m| js_to_value_checked(m, 0))
+            .transpose()?;
         tokio::task::spawn_blocking(move || {
             let guard = lock_inner(&inner)?;
-            guard.create_branch(&branch).map_err(to_napi_err)
+            match guard
+                .executor()
+                .execute(Command::BranchCreate {
+                    branch_id: Some(branch),
+                    metadata: meta_val,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::BranchWithVersion { .. } => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for BranchCreate",
+                )),
+            }
         })
         .await
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
@@ -1101,11 +1123,34 @@ impl Strata {
 
     /// List all branches.
     #[napi(js_name = "listBranches")]
-    pub async fn list_branches(&self) -> napi::Result<Vec<String>> {
+    pub async fn list_branches(
+        &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> napi::Result<serde_json::Value> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let guard = lock_inner(&inner)?;
-            guard.list_branches().map_err(to_napi_err)
+            match guard
+                .executor()
+                .execute(Command::BranchList {
+                    state: None,
+                    limit: limit.map(|l| l as u64),
+                    offset: offset.map(|o| o as u64),
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::BranchInfoList(branches) => {
+                    let names: Vec<serde_json::Value> = branches
+                        .into_iter()
+                        .map(|b| serde_json::Value::String(b.info.id.as_str().to_string()))
+                        .collect();
+                    Ok(serde_json::Value::Array(names))
+                }
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for BranchList",
+                )),
+            }
         })
         .await
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
@@ -1868,7 +1913,7 @@ impl Strata {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let guard = lock_inner(&inner)?;
-            let cfg = guard.config();
+            let cfg = guard.config().map_err(to_napi_err)?;
             let mut obj = serde_json::Map::new();
             obj.insert("durability".into(), serde_json::Value::String(cfg.durability));
             obj.insert("autoEmbed".into(), serde_json::Value::Bool(cfg.auto_embed));
@@ -1900,7 +1945,7 @@ impl Strata {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let guard = lock_inner(&inner)?;
-            Ok(guard.auto_embed_enabled())
+            guard.auto_embed_enabled().map_err(to_napi_err)
         })
         .await
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
@@ -1989,6 +2034,7 @@ impl Strata {
                 mode,
                 expand,
                 rerank,
+                precomputed_embedding: None,
             };
 
             match guard
@@ -2110,6 +2156,1831 @@ impl Strata {
         .await
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
     }
+
+    // =========================================================================
+    // Batch Operations
+    // =========================================================================
+
+    /// Batch put multiple KV entries.
+    #[napi(js_name = "kvBatchPut")]
+    pub async fn kv_batch_put(
+        &self,
+        entries: Vec<serde_json::Value>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        let batch: Vec<BatchKvEntry> = entries
+            .into_iter()
+            .map(|v| {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Expected object"))?;
+                let key = obj
+                    .get("key")
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'key'"))?
+                    .to_string();
+                let value = obj
+                    .get("value")
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'value'"))?
+                    .clone();
+                let value = js_to_value_checked(value, 0)?;
+                Ok(BatchKvEntry { key, value })
+            })
+            .collect::<napi::Result<_>>()?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            let branch = Some(BranchId::from(guard.current_branch()));
+            let space = Some(guard.current_space().to_string());
+            match guard
+                .executor()
+                .execute(Command::KvBatchPut {
+                    branch,
+                    space,
+                    entries: batch,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::BatchResults(results) => Ok(batch_results_to_js(results)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for KvBatchPut",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Batch set multiple state cells.
+    #[napi(js_name = "stateBatchSet")]
+    pub async fn state_batch_set(
+        &self,
+        entries: Vec<serde_json::Value>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        let batch: Vec<BatchStateEntry> = entries
+            .into_iter()
+            .map(|v| {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Expected object"))?;
+                let cell = obj
+                    .get("cell")
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'cell'"))?
+                    .to_string();
+                let value = obj
+                    .get("value")
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'value'"))?
+                    .clone();
+                let value = js_to_value_checked(value, 0)?;
+                Ok(BatchStateEntry { cell, value })
+            })
+            .collect::<napi::Result<_>>()?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            let branch = Some(BranchId::from(guard.current_branch()));
+            let space = Some(guard.current_space().to_string());
+            match guard
+                .executor()
+                .execute(Command::StateBatchSet {
+                    branch,
+                    space,
+                    entries: batch,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::BatchResults(results) => Ok(batch_results_to_js(results)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for StateBatchSet",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Batch append multiple events.
+    #[napi(js_name = "eventBatchAppend")]
+    pub async fn event_batch_append(
+        &self,
+        entries: Vec<serde_json::Value>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        let batch: Vec<BatchEventEntry> = entries
+            .into_iter()
+            .map(|v| {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Expected object"))?;
+                let event_type = obj
+                    .get("event_type")
+                    .or_else(|| obj.get("eventType"))
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| {
+                        napi::Error::from_reason("[VALIDATION] Missing 'event_type'")
+                    })?
+                    .to_string();
+                let payload = obj
+                    .get("payload")
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'payload'"))?
+                    .clone();
+                let payload = js_to_value_checked(payload, 0)?;
+                Ok(BatchEventEntry {
+                    event_type,
+                    payload,
+                })
+            })
+            .collect::<napi::Result<_>>()?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            let branch = Some(BranchId::from(guard.current_branch()));
+            let space = Some(guard.current_space().to_string());
+            match guard
+                .executor()
+                .execute(Command::EventBatchAppend {
+                    branch,
+                    space,
+                    entries: batch,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::BatchResults(results) => Ok(batch_results_to_js(results)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for EventBatchAppend",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Batch set multiple JSON documents.
+    #[napi(js_name = "jsonBatchSet")]
+    pub async fn json_batch_set(
+        &self,
+        entries: Vec<serde_json::Value>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        let batch: Vec<BatchJsonEntry> = entries
+            .into_iter()
+            .map(|v| {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Expected object"))?;
+                let key = obj
+                    .get("key")
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'key'"))?
+                    .to_string();
+                let path = obj
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'path'"))?
+                    .to_string();
+                let value = obj
+                    .get("value")
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'value'"))?
+                    .clone();
+                let value = js_to_value_checked(value, 0)?;
+                Ok(BatchJsonEntry { key, path, value })
+            })
+            .collect::<napi::Result<_>>()?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            let branch = Some(BranchId::from(guard.current_branch()));
+            let space = Some(guard.current_space().to_string());
+            match guard
+                .executor()
+                .execute(Command::JsonBatchSet {
+                    branch,
+                    space,
+                    entries: batch,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::BatchResults(results) => Ok(batch_results_to_js(results)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for JsonBatchSet",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Batch get multiple JSON documents.
+    #[napi(js_name = "jsonBatchGet")]
+    pub async fn json_batch_get(
+        &self,
+        entries: Vec<serde_json::Value>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        let batch: Vec<BatchJsonGetEntry> = entries
+            .into_iter()
+            .map(|v| {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Expected object"))?;
+                let key = obj
+                    .get("key")
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'key'"))?
+                    .to_string();
+                let path = obj
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'path'"))?
+                    .to_string();
+                Ok(BatchJsonGetEntry { key, path })
+            })
+            .collect::<napi::Result<_>>()?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            let branch = Some(BranchId::from(guard.current_branch()));
+            let space = Some(guard.current_space().to_string());
+            match guard
+                .executor()
+                .execute(Command::JsonBatchGet {
+                    branch,
+                    space,
+                    entries: batch,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::BatchGetResults(results) => Ok(batch_get_results_to_js(results)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for JsonBatchGet",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Batch delete multiple JSON documents.
+    #[napi(js_name = "jsonBatchDelete")]
+    pub async fn json_batch_delete(
+        &self,
+        entries: Vec<serde_json::Value>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        let batch: Vec<BatchJsonDeleteEntry> = entries
+            .into_iter()
+            .map(|v| {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Expected object"))?;
+                let key = obj
+                    .get("key")
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'key'"))?
+                    .to_string();
+                let path = obj
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'path'"))?
+                    .to_string();
+                Ok(BatchJsonDeleteEntry { key, path })
+            })
+            .collect::<napi::Result<_>>()?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            let branch = Some(BranchId::from(guard.current_branch()));
+            let space = Some(guard.current_space().to_string());
+            match guard
+                .executor()
+                .execute(Command::JsonBatchDelete {
+                    branch,
+                    space,
+                    entries: batch,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::BatchResults(results) => Ok(batch_results_to_js(results)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for JsonBatchDelete",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Configuration (key-value)
+    // =========================================================================
+
+    /// Set a configuration key-value pair.
+    #[napi(js_name = "configureSet")]
+    pub async fn configure_set(&self, key: String, value: String) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::ConfigureSet { key, value })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for ConfigureSet",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get a configuration value by key.
+    #[napi(js_name = "configureGet")]
+    pub async fn configure_get(&self, key: String) -> napi::Result<Option<String>> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::ConfigureGetKey { key })
+                .map_err(to_napi_err)?
+            {
+                Output::ConfigValue(v) => Ok(v),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for ConfigureGetKey",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Embedding
+    // =========================================================================
+
+    /// Embed a single text string.
+    #[napi]
+    pub async fn embed(&self, text: String) -> napi::Result<Vec<f64>> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::Embed { text })
+                .map_err(to_napi_err)?
+            {
+                Output::Embedding(vec) => Ok(vec.into_iter().map(|f| f as f64).collect()),
+                _ => Err(napi::Error::from_reason("Unexpected output for Embed")),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Embed multiple texts in a batch.
+    #[napi(js_name = "embedBatch")]
+    pub async fn embed_batch(&self, texts: Vec<String>) -> napi::Result<Vec<Vec<f64>>> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::EmbedBatch { texts })
+                .map_err(to_napi_err)?
+            {
+                Output::Embeddings(vecs) => Ok(vecs
+                    .into_iter()
+                    .map(|v| v.into_iter().map(|f| f as f64).collect())
+                    .collect()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for EmbedBatch",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get the embedding pipeline status.
+    #[napi(js_name = "embedStatus")]
+    pub async fn embed_status(&self) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::EmbedStatus)
+                .map_err(to_napi_err)?
+            {
+                Output::EmbedStatus(info) => Ok(serde_json::json!({
+                    "autoEmbed": info.auto_embed,
+                    "batchSize": info.batch_size,
+                    "pending": info.pending,
+                    "totalQueued": info.total_queued,
+                    "totalEmbedded": info.total_embedded,
+                    "totalFailed": info.total_failed,
+                    "schedulerQueueDepth": info.scheduler_queue_depth,
+                    "schedulerActiveTasks": info.scheduler_active_tasks,
+                })),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for EmbedStatus",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Inference
+    // =========================================================================
+
+    /// Generate text from a model.
+    #[napi]
+    pub async fn generate(
+        &self,
+        model: String,
+        prompt: String,
+        options: Option<serde_json::Value>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        let (max_tokens, temperature, top_k, top_p, seed, stop_tokens, stop_sequences) =
+            match options {
+                Some(opts) => {
+                    let obj = opts.as_object();
+                    (
+                        obj.and_then(|o| o.get("maxTokens"))
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize),
+                        obj.and_then(|o| o.get("temperature"))
+                            .and_then(|v| v.as_f64())
+                            .map(|f| f as f32),
+                        obj.and_then(|o| o.get("topK"))
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize),
+                        obj.and_then(|o| o.get("topP"))
+                            .and_then(|v| v.as_f64())
+                            .map(|f| f as f32),
+                        obj.and_then(|o| o.get("seed")).and_then(|v| v.as_u64()),
+                        obj.and_then(|o| o.get("stopTokens"))
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|n| n.as_u64().map(|n| n as u32))
+                                    .collect()
+                            }),
+                        obj.and_then(|o| o.get("stopSequences"))
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            }),
+                    )
+                }
+                None => (None, None, None, None, None, None, None),
+            };
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::Generate {
+                    model,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_k,
+                    top_p,
+                    seed,
+                    stop_tokens,
+                    stop_sequences,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Generated(result) => Ok(serde_json::json!({
+                    "text": result.text,
+                    "stopReason": result.stop_reason,
+                    "promptTokens": result.prompt_tokens,
+                    "completionTokens": result.completion_tokens,
+                    "model": result.model,
+                })),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for Generate",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Tokenize text using a model's tokenizer.
+    #[napi]
+    pub async fn tokenize(
+        &self,
+        model: String,
+        text: String,
+        options: Option<serde_json::Value>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        let add_special_tokens = options
+            .and_then(|o| o.as_object().and_then(|obj| obj.get("addSpecialTokens")?.as_bool()));
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::Tokenize {
+                    model,
+                    text,
+                    add_special_tokens,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::TokenIds(result) => Ok(serde_json::json!({
+                    "ids": result.ids,
+                    "count": result.count,
+                    "model": result.model,
+                })),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for Tokenize",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Detokenize token IDs back to text.
+    #[napi]
+    pub async fn detokenize(
+        &self,
+        model: String,
+        ids: Vec<u32>,
+    ) -> napi::Result<String> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::Detokenize { model, ids })
+                .map_err(to_napi_err)?
+            {
+                Output::Text(text) => Ok(text),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for Detokenize",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Unload a model from memory.
+    #[napi(js_name = "generateUnload")]
+    pub async fn generate_unload(&self, model: String) -> napi::Result<bool> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GenerateUnload { model })
+                .map_err(to_napi_err)?
+            {
+                Output::Bool(b) => Ok(b),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GenerateUnload",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Model Management
+    // =========================================================================
+
+    /// List all available models.
+    #[napi(js_name = "modelsList")]
+    pub async fn models_list(&self) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::ModelsList)
+                .map_err(to_napi_err)?
+            {
+                Output::ModelsList(models) => {
+                    let arr: Vec<serde_json::Value> = models
+                        .into_iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "name": m.name,
+                                "task": m.task,
+                                "architecture": m.architecture,
+                                "defaultQuant": m.default_quant,
+                                "embeddingDim": m.embedding_dim,
+                                "isLocal": m.is_local,
+                                "sizeBytes": m.size_bytes,
+                            })
+                        })
+                        .collect();
+                    Ok(serde_json::Value::Array(arr))
+                }
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for ModelsList",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Pull/download a model by name.
+    #[napi(js_name = "modelsPull")]
+    pub async fn models_pull(&self, name: String) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::ModelsPull { name })
+                .map_err(to_napi_err)?
+            {
+                Output::ModelsPulled { name, path } => Ok(serde_json::json!({
+                    "name": name,
+                    "path": path,
+                })),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for ModelsPull",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// List locally downloaded models.
+    #[napi(js_name = "modelsLocal")]
+    pub async fn models_local(&self) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::ModelsLocal)
+                .map_err(to_napi_err)?
+            {
+                Output::ModelsList(models) => {
+                    let arr: Vec<serde_json::Value> = models
+                        .into_iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "name": m.name,
+                                "task": m.task,
+                                "architecture": m.architecture,
+                                "defaultQuant": m.default_quant,
+                                "embeddingDim": m.embedding_dim,
+                                "isLocal": m.is_local,
+                                "sizeBytes": m.size_bytes,
+                            })
+                        })
+                        .collect();
+                    Ok(serde_json::Value::Array(arr))
+                }
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for ModelsLocal",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Durability
+    // =========================================================================
+
+    /// Get WAL durability counters.
+    #[napi(js_name = "durabilityCounters")]
+    pub async fn durability_counters(&self) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::DurabilityCounters)
+                .map_err(to_napi_err)?
+            {
+                Output::DurabilityCounters(counters) => Ok(serde_json::json!({
+                    "walAppends": counters.wal_appends,
+                    "syncCalls": counters.sync_calls,
+                    "bytesWritten": counters.bytes_written,
+                    "syncNanos": counters.sync_nanos,
+                })),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for DurabilityCounters",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Graph — Lifecycle
+    // =========================================================================
+
+    /// Create a new graph.
+    #[napi(js_name = "graphCreate")]
+    pub async fn graph_create(
+        &self,
+        graph: String,
+        cascade_policy: Option<String>,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphCreate {
+                    branch: None,
+                    graph,
+                    cascade_policy,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphCreate",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Delete a graph.
+    #[napi(js_name = "graphDelete")]
+    pub async fn graph_delete(&self, graph: String) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphDelete {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphDelete",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// List all graph names.
+    #[napi(js_name = "graphList")]
+    pub async fn graph_list(&self) -> napi::Result<Vec<String>> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphList { branch: None })
+                .map_err(to_napi_err)?
+            {
+                Output::Keys(keys) => Ok(keys),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphList",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get graph metadata.
+    #[napi(js_name = "graphGetMeta")]
+    pub async fn graph_get_meta(&self, graph: String) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphGetMeta {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Maybe(None) => Ok(serde_json::Value::Null),
+                Output::Maybe(Some(v)) => Ok(value_to_js(v)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphGetMeta",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Graph — Nodes
+    // =========================================================================
+
+    /// Add or update a node.
+    #[napi(js_name = "graphAddNode")]
+    pub async fn graph_add_node(
+        &self,
+        graph: String,
+        node_id: String,
+        entity_ref: Option<String>,
+        properties: Option<serde_json::Value>,
+        object_type: Option<String>,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        let props = properties
+            .map(|p| js_to_value_checked(p, 0))
+            .transpose()?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphAddNode {
+                    branch: None,
+                    graph,
+                    node_id,
+                    entity_ref,
+                    properties: props,
+                    object_type,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphAddNode",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get a node.
+    #[napi(js_name = "graphGetNode")]
+    pub async fn graph_get_node(
+        &self,
+        graph: String,
+        node_id: String,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphGetNode {
+                    branch: None,
+                    graph,
+                    node_id,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Maybe(None) => Ok(serde_json::Value::Null),
+                Output::Maybe(Some(v)) => Ok(value_to_js(v)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphGetNode",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Remove a node and its incident edges.
+    #[napi(js_name = "graphRemoveNode")]
+    pub async fn graph_remove_node(
+        &self,
+        graph: String,
+        node_id: String,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphRemoveNode {
+                    branch: None,
+                    graph,
+                    node_id,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphRemoveNode",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// List all node IDs in a graph.
+    #[napi(js_name = "graphListNodes")]
+    pub async fn graph_list_nodes(&self, graph: String) -> napi::Result<Vec<String>> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphListNodes {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Keys(keys) => Ok(keys),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphListNodes",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// List node IDs with cursor-based pagination.
+    #[napi(js_name = "graphListNodesPaginated")]
+    pub async fn graph_list_nodes_paginated(
+        &self,
+        graph: String,
+        limit: u32,
+        cursor: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphListNodesPaginated {
+                    branch: None,
+                    graph,
+                    limit: limit as usize,
+                    cursor,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::GraphPage { items, next_cursor } => Ok(serde_json::json!({
+                    "items": items,
+                    "nextCursor": next_cursor,
+                })),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphListNodesPaginated",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Graph — Edges
+    // =========================================================================
+
+    /// Add or update an edge.
+    #[napi(js_name = "graphAddEdge")]
+    pub async fn graph_add_edge(
+        &self,
+        graph: String,
+        src: String,
+        dst: String,
+        edge_type: String,
+        weight: Option<f64>,
+        properties: Option<serde_json::Value>,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        let props = properties
+            .map(|p| js_to_value_checked(p, 0))
+            .transpose()?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphAddEdge {
+                    branch: None,
+                    graph,
+                    src,
+                    dst,
+                    edge_type,
+                    weight,
+                    properties: props,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphAddEdge",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Remove an edge.
+    #[napi(js_name = "graphRemoveEdge")]
+    pub async fn graph_remove_edge(
+        &self,
+        graph: String,
+        src: String,
+        dst: String,
+        edge_type: String,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphRemoveEdge {
+                    branch: None,
+                    graph,
+                    src,
+                    dst,
+                    edge_type,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphRemoveEdge",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get neighbors of a node.
+    #[napi(js_name = "graphNeighbors")]
+    pub async fn graph_neighbors(
+        &self,
+        graph: String,
+        node_id: String,
+        direction: Option<String>,
+        edge_type: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphNeighbors {
+                    branch: None,
+                    graph,
+                    node_id,
+                    direction,
+                    edge_type,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::GraphNeighbors(neighbors) => {
+                    let arr: Vec<serde_json::Value> = neighbors
+                        .into_iter()
+                        .map(|n| {
+                            serde_json::json!({
+                                "nodeId": n.node_id,
+                                "edgeType": n.edge_type,
+                                "weight": n.weight,
+                            })
+                        })
+                        .collect();
+                    Ok(serde_json::Value::Array(arr))
+                }
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphNeighbors",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Graph — Bulk & Traversal
+    // =========================================================================
+
+    /// Bulk insert nodes and edges into a graph.
+    #[napi(js_name = "graphBulkInsert")]
+    pub async fn graph_bulk_insert(
+        &self,
+        graph: String,
+        nodes: Vec<serde_json::Value>,
+        edges: Vec<serde_json::Value>,
+        chunk_size: Option<u32>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        let bulk_nodes: Vec<BulkGraphNode> = nodes
+            .into_iter()
+            .map(|v| {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Expected object"))?;
+                let node_id = obj
+                    .get("nodeId")
+                    .or_else(|| obj.get("node_id"))
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'nodeId'"))?
+                    .to_string();
+                let entity_ref = obj
+                    .get("entityRef")
+                    .or_else(|| obj.get("entity_ref"))
+                    .and_then(|k| k.as_str())
+                    .map(|s| s.to_string());
+                let properties = obj
+                    .get("properties")
+                    .filter(|v| !v.is_null())
+                    .map(|p| js_to_value_checked(p.clone(), 0))
+                    .transpose()?;
+                let object_type = obj
+                    .get("objectType")
+                    .or_else(|| obj.get("object_type"))
+                    .and_then(|k| k.as_str())
+                    .map(|s| s.to_string());
+                Ok(BulkGraphNode {
+                    node_id,
+                    entity_ref,
+                    properties,
+                    object_type,
+                })
+            })
+            .collect::<napi::Result<_>>()?;
+        let bulk_edges: Vec<BulkGraphEdge> = edges
+            .into_iter()
+            .map(|v| {
+                let obj = v
+                    .as_object()
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Expected object"))?;
+                let src = obj
+                    .get("src")
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'src'"))?
+                    .to_string();
+                let dst = obj
+                    .get("dst")
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'dst'"))?
+                    .to_string();
+                let edge_type = obj
+                    .get("edgeType")
+                    .or_else(|| obj.get("edge_type"))
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| napi::Error::from_reason("[VALIDATION] Missing 'edgeType'"))?
+                    .to_string();
+                let weight = obj.get("weight").and_then(|w| w.as_f64());
+                let properties = obj
+                    .get("properties")
+                    .filter(|v| !v.is_null())
+                    .map(|p| js_to_value_checked(p.clone(), 0))
+                    .transpose()?;
+                Ok(BulkGraphEdge {
+                    src,
+                    dst,
+                    edge_type,
+                    weight,
+                    properties,
+                })
+            })
+            .collect::<napi::Result<_>>()?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphBulkInsert {
+                    branch: None,
+                    graph,
+                    nodes: bulk_nodes,
+                    edges: bulk_edges,
+                    chunk_size: chunk_size.map(|c| c as usize),
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::GraphBulkInsertResult {
+                    nodes_inserted,
+                    edges_inserted,
+                } => Ok(serde_json::json!({
+                    "nodesInserted": nodes_inserted,
+                    "edgesInserted": edges_inserted,
+                })),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphBulkInsert",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// BFS traversal from a start node.
+    #[napi(js_name = "graphBfs")]
+    pub async fn graph_bfs(
+        &self,
+        graph: String,
+        start: String,
+        max_depth: u32,
+        max_nodes: Option<u32>,
+        edge_types: Option<Vec<String>>,
+        direction: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphBfs {
+                    branch: None,
+                    graph,
+                    start,
+                    max_depth: max_depth as usize,
+                    max_nodes: max_nodes.map(|n| n as usize),
+                    edge_types,
+                    direction,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::GraphBfs(result) => Ok(graph_bfs_result_to_js(result)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphBfs",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Graph — Ontology
+    // =========================================================================
+
+    /// Define an object type in the graph ontology.
+    #[napi(js_name = "graphDefineObjectType")]
+    pub async fn graph_define_object_type(
+        &self,
+        graph: String,
+        definition: serde_json::Value,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        let def = js_to_value_checked(definition, 0)?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphDefineObjectType {
+                    branch: None,
+                    graph,
+                    definition: def,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphDefineObjectType",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get an object type definition.
+    #[napi(js_name = "graphGetObjectType")]
+    pub async fn graph_get_object_type(
+        &self,
+        graph: String,
+        name: String,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphGetObjectType {
+                    branch: None,
+                    graph,
+                    name,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Maybe(None) => Ok(serde_json::Value::Null),
+                Output::Maybe(Some(v)) => Ok(value_to_js(v)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphGetObjectType",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// List all object type names.
+    #[napi(js_name = "graphListObjectTypes")]
+    pub async fn graph_list_object_types(
+        &self,
+        graph: String,
+    ) -> napi::Result<Vec<String>> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphListObjectTypes {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Keys(keys) => Ok(keys),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphListObjectTypes",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Delete an object type definition.
+    #[napi(js_name = "graphDeleteObjectType")]
+    pub async fn graph_delete_object_type(
+        &self,
+        graph: String,
+        name: String,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphDeleteObjectType {
+                    branch: None,
+                    graph,
+                    name,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphDeleteObjectType",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Define a link type in the graph ontology.
+    #[napi(js_name = "graphDefineLinkType")]
+    pub async fn graph_define_link_type(
+        &self,
+        graph: String,
+        definition: serde_json::Value,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        let def = js_to_value_checked(definition, 0)?;
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphDefineLinkType {
+                    branch: None,
+                    graph,
+                    definition: def,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphDefineLinkType",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get a link type definition.
+    #[napi(js_name = "graphGetLinkType")]
+    pub async fn graph_get_link_type(
+        &self,
+        graph: String,
+        name: String,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphGetLinkType {
+                    branch: None,
+                    graph,
+                    name,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Maybe(None) => Ok(serde_json::Value::Null),
+                Output::Maybe(Some(v)) => Ok(value_to_js(v)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphGetLinkType",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// List all link type names.
+    #[napi(js_name = "graphListLinkTypes")]
+    pub async fn graph_list_link_types(
+        &self,
+        graph: String,
+    ) -> napi::Result<Vec<String>> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphListLinkTypes {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Keys(keys) => Ok(keys),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphListLinkTypes",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Delete a link type definition.
+    #[napi(js_name = "graphDeleteLinkType")]
+    pub async fn graph_delete_link_type(
+        &self,
+        graph: String,
+        name: String,
+    ) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphDeleteLinkType {
+                    branch: None,
+                    graph,
+                    name,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphDeleteLinkType",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Freeze the graph ontology (no more type changes).
+    #[napi(js_name = "graphFreezeOntology")]
+    pub async fn graph_freeze_ontology(&self, graph: String) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphFreezeOntology {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Unit => Ok(()),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphFreezeOntology",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get the ontology status of a graph.
+    #[napi(js_name = "graphOntologyStatus")]
+    pub async fn graph_ontology_status(
+        &self,
+        graph: String,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphOntologyStatus {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Maybe(None) => Ok(serde_json::Value::Null),
+                Output::Maybe(Some(v)) => Ok(value_to_js(v)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphOntologyStatus",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get a complete ontology summary.
+    #[napi(js_name = "graphOntologySummary")]
+    pub async fn graph_ontology_summary(
+        &self,
+        graph: String,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphOntologySummary {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Maybe(None) => Ok(serde_json::Value::Null),
+                Output::Maybe(Some(v)) => Ok(value_to_js(v)),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphOntologySummary",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// List all ontology types (both object and link types).
+    #[napi(js_name = "graphListOntologyTypes")]
+    pub async fn graph_list_ontology_types(
+        &self,
+        graph: String,
+    ) -> napi::Result<Vec<String>> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphListOntologyTypes {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Keys(keys) => Ok(keys),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphListOntologyTypes",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Get all node IDs of a given object type.
+    #[napi(js_name = "graphNodesByType")]
+    pub async fn graph_nodes_by_type(
+        &self,
+        graph: String,
+        object_type: String,
+    ) -> napi::Result<Vec<String>> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphNodesByType {
+                    branch: None,
+                    graph,
+                    object_type,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::Keys(keys) => Ok(keys),
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphNodesByType",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // =========================================================================
+    // Graph — Analytics
+    // =========================================================================
+
+    /// Weakly Connected Components.
+    #[napi(js_name = "graphWcc")]
+    pub async fn graph_wcc(&self, graph: String) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphWcc {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::GraphAnalyticsU64(result) => {
+                    Ok(graph_analytics_u64_to_js(result))
+                }
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphWcc",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Community Detection via Label Propagation.
+    #[napi(js_name = "graphCdlp")]
+    pub async fn graph_cdlp(
+        &self,
+        graph: String,
+        max_iterations: u32,
+        direction: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphCdlp {
+                    branch: None,
+                    graph,
+                    max_iterations: max_iterations as usize,
+                    direction,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::GraphAnalyticsU64(result) => {
+                    Ok(graph_analytics_u64_to_js(result))
+                }
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphCdlp",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// PageRank importance scoring.
+    #[napi(js_name = "graphPagerank")]
+    pub async fn graph_pagerank(
+        &self,
+        graph: String,
+        damping: Option<f64>,
+        max_iterations: Option<u32>,
+        tolerance: Option<f64>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphPagerank {
+                    branch: None,
+                    graph,
+                    damping,
+                    max_iterations: max_iterations.map(|m| m as usize),
+                    tolerance,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::GraphAnalyticsF64(result) => {
+                    Ok(graph_analytics_f64_to_js(result))
+                }
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphPagerank",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Local Clustering Coefficient.
+    #[napi(js_name = "graphLcc")]
+    pub async fn graph_lcc(&self, graph: String) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphLcc {
+                    branch: None,
+                    graph,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::GraphAnalyticsF64(result) => {
+                    Ok(graph_analytics_f64_to_js(result))
+                }
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphLcc",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    /// Single-Source Shortest Path (Dijkstra).
+    #[napi(js_name = "graphSssp")]
+    pub async fn graph_sssp(
+        &self,
+        graph: String,
+        source: String,
+        direction: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .executor()
+                .execute(Command::GraphSssp {
+                    branch: None,
+                    graph,
+                    source,
+                    direction,
+                })
+                .map_err(to_napi_err)?
+            {
+                Output::GraphAnalyticsF64(result) => {
+                    Ok(graph_analytics_f64_to_js(result))
+                }
+                _ => Err(napi::Error::from_reason(
+                    "Unexpected output for GraphSssp",
+                )),
+            }
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch result helpers
+// ---------------------------------------------------------------------------
+
+fn batch_results_to_js(results: Vec<BatchItemResult>) -> serde_json::Value {
+    let arr: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "version": r.version.map(|v| v as i64),
+                "error": r.error,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(arr)
+}
+
+fn batch_get_results_to_js(results: Vec<BatchGetItemResult>) -> serde_json::Value {
+    let arr: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "value": r.value.map(value_to_js),
+                "version": r.version.map(|v| v as i64),
+                "timestamp": r.timestamp.map(|t| t as i64),
+                "error": r.error,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(arr)
 }
 
 // ---------------------------------------------------------------------------
@@ -2184,5 +4055,57 @@ fn bundle_validate_result_to_js(r: BundleValidateResult) -> serde_json::Value {
         "formatVersion": r.format_version,
         "entryCount": r.entry_count,
         "checksumsValid": r.checksums_valid,
+    })
+}
+
+fn graph_bfs_result_to_js(r: GraphBfsResult) -> serde_json::Value {
+    let edges: Vec<serde_json::Value> = r
+        .edges
+        .into_iter()
+        .map(|(src, dst, edge_type)| {
+            serde_json::json!({ "src": src, "dst": dst, "edgeType": edge_type })
+        })
+        .collect();
+    let depths: serde_json::Map<String, serde_json::Value> = r
+        .depths
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::Value::Number((v as u64).into())))
+        .collect();
+    serde_json::json!({
+        "visited": r.visited,
+        "depths": depths,
+        "edges": edges,
+    })
+}
+
+fn graph_analytics_u64_to_js(r: GraphAnalyticsU64Result) -> serde_json::Value {
+    let result: serde_json::Map<String, serde_json::Value> = r
+        .result
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::Value::Number(v.into())))
+        .collect();
+    serde_json::json!({
+        "algorithm": r.algorithm,
+        "result": result,
+    })
+}
+
+fn graph_analytics_f64_to_js(r: GraphAnalyticsF64Result) -> serde_json::Value {
+    let result: serde_json::Map<String, serde_json::Value> = r
+        .result
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k,
+                serde_json::Number::from_f64(v)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "algorithm": r.algorithm,
+        "result": result,
+        "iterations": r.iterations,
     })
 }

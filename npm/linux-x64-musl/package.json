@@ -1,6 +1,6 @@
 {
   "name": "@stratadb/core-linux-x64-musl",
-  "version": "0.12.5",
+  "version": "0.13.0",
   "os": [
     "linux"
   ],
@@ -33,10 +33,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/stratadb-labs/strata-node.git"
+    "url": "git+https://github.com/stratalab/strata-node.git"
   },
   "bugs": {
-    "url": "https://github.com/stratadb-labs/strata-node/issues"
+    "url": "https://github.com/stratalab/strata-node/issues"
   },
   "libc": [
     "musl"

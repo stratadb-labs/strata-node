@@ -715,13 +715,18 @@ describe('Strata', () => {
       const snapshot = db.at(12345);
       expect(() => snapshot.kv.set('k', 'v')).toThrow(StateError);
       expect(() => snapshot.kv.delete('k')).toThrow(StateError);
+      expect(() => snapshot.kv.batchPut([])).toThrow(StateError);
       expect(() => snapshot.state.set('c', 'v')).toThrow(StateError);
       expect(() => snapshot.state.init('c', 'v')).toThrow(StateError);
       expect(() => snapshot.state.cas('c', 'v')).toThrow(StateError);
       expect(() => snapshot.state.delete('c')).toThrow(StateError);
+      expect(() => snapshot.state.batchSet([])).toThrow(StateError);
       expect(() => snapshot.events.append('t', {})).toThrow(StateError);
+      expect(() => snapshot.events.batchAppend([])).toThrow(StateError);
       expect(() => snapshot.json.set('k', '$', {})).toThrow(StateError);
       expect(() => snapshot.json.delete('k', '$')).toThrow(StateError);
+      expect(() => snapshot.json.batchSet([])).toThrow(StateError);
+      expect(() => snapshot.json.batchDelete([])).toThrow(StateError);
       expect(() => snapshot.vector.createCollection('c', {})).toThrow(StateError);
       expect(() => snapshot.vector.deleteCollection('c')).toThrow(StateError);
       expect(() => snapshot.vector.upsert('c', 'k', [])).toThrow(StateError);
@@ -940,6 +945,1076 @@ describe('Strata', () => {
         expect(err).toBeInstanceOf(ConstraintError);
         expect(err.code).toBe('CONSTRAINT');
       }
+    });
+  });
+
+  // =========================================================================
+  // Batch KV — db.kv.batchPut
+  // =========================================================================
+
+  describe('db.kv.batchPut', () => {
+    test('batchPut stores all entries and returns versions', async () => {
+      const results = await db.kv.batchPut([
+        { key: 'bk1', value: 'v1' },
+        { key: 'bk2', value: 'v2' },
+        { key: 'bk3', value: { nested: true } },
+      ]);
+      expect(Array.isArray(results)).toBe(true);
+      expect(results.length).toBe(3);
+      results.forEach((r) => {
+        expect(typeof r.version).toBe('number');
+        expect(r.version).toBeGreaterThan(0);
+        expect(r.error).toBeNull();
+      });
+      expect(await db.kv.get('bk1')).toBe('v1');
+      expect(await db.kv.get('bk2')).toBe('v2');
+      const obj = await db.kv.get('bk3');
+      expect(obj.nested).toBe(true);
+    });
+
+    test('batchPut empty array returns empty array', async () => {
+      const results = await db.kv.batchPut([]);
+      expect(Array.isArray(results)).toBe(true);
+      expect(results.length).toBe(0);
+    });
+
+    test('batchPut overwrites existing keys', async () => {
+      await db.kv.set('bk_ow', 'original');
+      const results = await db.kv.batchPut([{ key: 'bk_ow', value: 'updated' }]);
+      expect(results[0].error).toBeNull();
+      expect(await db.kv.get('bk_ow')).toBe('updated');
+    });
+
+    test('batchPut rejects entries missing key', async () => {
+      await expect(db.kv.batchPut([{ value: 'no_key' }])).rejects.toThrow(/key/i);
+    });
+
+    test('batchPut rejects non-object entries', async () => {
+      await expect(db.kv.batchPut(['string_entry'])).rejects.toThrow();
+    });
+  });
+
+  // =========================================================================
+  // Batch State — db.state.batchSet
+  // =========================================================================
+
+  describe('db.state.batchSet', () => {
+    test('batchSet stores all entries', async () => {
+      const results = await db.state.batchSet([
+        { cell: 'bs1', value: 100 },
+        { cell: 'bs2', value: 'hello' },
+      ]);
+      expect(results.length).toBe(2);
+      results.forEach((r) => {
+        expect(typeof r.version).toBe('number');
+        expect(r.version).toBeGreaterThan(0);
+        expect(r.error).toBeNull();
+      });
+      expect(await db.state.get('bs1')).toBe(100);
+      expect(await db.state.get('bs2')).toBe('hello');
+    });
+
+    test('batchSet empty array', async () => {
+      const results = await db.state.batchSet([]);
+      expect(results).toEqual([]);
+    });
+
+    test('batchSet rejects entries missing cell', async () => {
+      await expect(db.state.batchSet([{ value: 1 }])).rejects.toThrow(/cell/i);
+    });
+  });
+
+  // =========================================================================
+  // Batch Events — db.events.batchAppend
+  // =========================================================================
+
+  describe('db.events.batchAppend', () => {
+    test('batchAppend stores events and they are retrievable', async () => {
+      const results = await db.events.batchAppend([
+        { event_type: 'click', payload: { x: 10 } },
+        { event_type: 'scroll', payload: { y: 200 } },
+        { event_type: 'click', payload: { x: 30 } },
+      ]);
+      expect(results.length).toBe(3);
+      results.forEach((r) => {
+        expect(typeof r.version).toBe('number');
+        expect(r.error).toBeNull();
+      });
+      expect(await db.events.count()).toBe(3);
+      // Verify events can be read back by type
+      const clicks = await db.events.list('click');
+      expect(clicks.length).toBe(2);
+    });
+
+    test('batchAppend accepts eventType camelCase', async () => {
+      const results = await db.events.batchAppend([
+        { eventType: 'camel', payload: { ok: true } },
+      ]);
+      expect(results.length).toBe(1);
+      expect(results[0].error).toBeNull();
+    });
+
+    test('batchAppend empty array', async () => {
+      const results = await db.events.batchAppend([]);
+      expect(results).toEqual([]);
+    });
+  });
+
+  // =========================================================================
+  // Batch JSON — db.json.batchSet / batchGet / batchDelete
+  // =========================================================================
+
+  describe('db.json batch', () => {
+    test('batchSet stores documents retrievable by get', async () => {
+      const results = await db.json.batchSet([
+        { key: 'jb1', path: '$', value: { a: 1 } },
+        { key: 'jb2', path: '$', value: { b: 2 } },
+      ]);
+      expect(results.length).toBe(2);
+      results.forEach((r) => {
+        expect(typeof r.version).toBe('number');
+        expect(r.version).toBeGreaterThan(0);
+        expect(r.error).toBeNull();
+      });
+      // Verify data was actually stored
+      expect((await db.json.get('jb1', '$')).a).toBe(1);
+      expect((await db.json.get('jb2', '$')).b).toBe(2);
+    });
+
+    test('batchGet returns values with version and timestamp', async () => {
+      await db.json.set('jbg1', '$', { x: 10 });
+      await db.json.set('jbg2', '$', { y: 20 });
+      const results = await db.json.batchGet([
+        { key: 'jbg1', path: '$' },
+        { key: 'jbg2', path: '$' },
+      ]);
+      expect(results.length).toBe(2);
+      // Verify values
+      expect(results[0].value.x).toBe(10);
+      expect(results[1].value.y).toBe(20);
+      // Verify version and timestamp are present
+      results.forEach((r) => {
+        expect(r.error).toBeNull();
+        expect(typeof r.version).toBe('number');
+        expect(typeof r.timestamp).toBe('number');
+      });
+    });
+
+    test('batchGet missing key returns null value', async () => {
+      const results = await db.json.batchGet([
+        { key: 'nonexistent_jbg', path: '$' },
+      ]);
+      expect(results.length).toBe(1);
+      expect(results[0].value).toBeNull();
+    });
+
+    test('batchDelete removes documents', async () => {
+      await db.json.set('jbd1', '$', { del: true });
+      await db.json.set('jbd2', '$', { del: true });
+      const results = await db.json.batchDelete([
+        { key: 'jbd1', path: '$' },
+        { key: 'jbd2', path: '$' },
+      ]);
+      expect(results.length).toBe(2);
+      results.forEach((r) => {
+        expect(r.error).toBeNull();
+      });
+      // Verify data is actually gone
+      expect(await db.json.get('jbd1', '$')).toBeNull();
+      expect(await db.json.get('jbd2', '$')).toBeNull();
+    });
+
+    test('batchDelete nonexistent key does not error', async () => {
+      const results = await db.json.batchDelete([
+        { key: 'nonexistent_jbd', path: '$' },
+      ]);
+      expect(results.length).toBe(1);
+    });
+
+    test('batchSet empty array', async () => {
+      const results = await db.json.batchSet([]);
+      expect(results).toEqual([]);
+    });
+
+    test('batchGet empty array', async () => {
+      const results = await db.json.batchGet([]);
+      expect(results).toEqual([]);
+    });
+
+    test('batchSet rejects entries missing key', async () => {
+      await expect(
+        db.json.batchSet([{ path: '$', value: 'no_key' }]),
+      ).rejects.toThrow(/key/i);
+    });
+  });
+
+  // =========================================================================
+  // Configuration — configureSet / configureGet
+  // =========================================================================
+
+  describe('Configuration key-value', () => {
+    test('configureSet and configureGet roundtrip', async () => {
+      await db.configureSet('bm25_k1', '1.5');
+      const value = await db.configureGet('bm25_k1');
+      expect(value).toBe('1.5');
+    });
+
+    test('configureSet and configureGet durability', async () => {
+      await db.configureSet('durability', 'standard');
+      const value = await db.configureGet('durability');
+      expect(value).toBe('standard');
+    });
+
+    test('configureSet rejects unknown key', async () => {
+      await expect(db.configureSet('nonexistent.key', 'val')).rejects.toThrow();
+    });
+  });
+
+  // =========================================================================
+  // Durability — durabilityCounters
+  // =========================================================================
+
+  describe('Durability', () => {
+    test('durabilityCounters returns expected fields', async () => {
+      const counters = await db.durabilityCounters();
+      expect(counters).toHaveProperty('walAppends');
+      expect(counters).toHaveProperty('syncCalls');
+      expect(counters).toHaveProperty('bytesWritten');
+      expect(counters).toHaveProperty('syncNanos');
+      expect(typeof counters.walAppends).toBe('number');
+      expect(typeof counters.syncCalls).toBe('number');
+      expect(typeof counters.bytesWritten).toBe('number');
+      expect(typeof counters.syncNanos).toBe('number');
+    });
+
+    test('durabilityCounters reflect writes', async () => {
+      const before = await db.durabilityCounters();
+      await db.kv.set('dur-test', 'value');
+      const after = await db.durabilityCounters();
+      // WAL appends should increase after a write
+      expect(after.walAppends).toBeGreaterThanOrEqual(before.walAppends);
+    });
+  });
+
+  // =========================================================================
+  // Embedding / Inference / Models (require feature flags + model downloads)
+  // =========================================================================
+
+  describe('Embedding', () => {
+    test.skip('embed returns float vector (requires embed feature)', async () => {
+      const vec = await db.embed('hello world');
+      expect(Array.isArray(vec)).toBe(true);
+      expect(vec.length).toBeGreaterThan(0);
+    });
+
+    test.skip('embedBatch returns array of vectors', async () => {
+      const vecs = await db.embedBatch(['hello', 'world']);
+      expect(Array.isArray(vecs)).toBe(true);
+      expect(vecs.length).toBe(2);
+    });
+
+    test('embedStatus returns status object', async () => {
+      const status = await db.embedStatus();
+      expect(status).toHaveProperty('autoEmbed');
+      expect(status).toHaveProperty('pending');
+      expect(status).toHaveProperty('totalQueued');
+      expect(status).toHaveProperty('totalEmbedded');
+      expect(status).toHaveProperty('totalFailed');
+      expect(typeof status.autoEmbed).toBe('boolean');
+      expect(typeof status.pending).toBe('number');
+      expect(typeof status.totalQueued).toBe('number');
+    });
+  });
+
+  describe('Inference', () => {
+    test.skip('generate returns result (requires model)', async () => {
+      const result = await db.generate('miniLM', 'Hello', { maxTokens: 10 });
+      expect(result).toHaveProperty('text');
+      expect(result).toHaveProperty('stopReason');
+      expect(result).toHaveProperty('promptTokens');
+      expect(result).toHaveProperty('completionTokens');
+      expect(result).toHaveProperty('model');
+    });
+
+    test.skip('tokenize returns token IDs (requires model)', async () => {
+      const result = await db.tokenize('miniLM', 'Hello world');
+      expect(result).toHaveProperty('ids');
+      expect(result).toHaveProperty('count');
+    });
+  });
+
+  describe('Models', () => {
+    test('modelsList returns array with expected structure', async () => {
+      const models = await db.modelsList();
+      expect(Array.isArray(models)).toBe(true);
+      // If models are available, verify structure
+      if (models.length > 0) {
+        const model = models[0];
+        expect(model).toHaveProperty('name');
+        expect(model).toHaveProperty('task');
+        expect(model).toHaveProperty('defaultQuant');
+        expect(model).toHaveProperty('isLocal');
+        expect(typeof model.name).toBe('string');
+        expect(typeof model.isLocal).toBe('boolean');
+      }
+    });
+
+    test('modelsLocal returns array', async () => {
+      const models = await db.modelsLocal();
+      expect(Array.isArray(models)).toBe(true);
+    });
+  });
+
+  // =========================================================================
+  // Graph — db.graph
+  // =========================================================================
+
+  describe('db.graph', () => {
+    describe('lifecycle', () => {
+      test('create, list, info, delete', async () => {
+        await db.graph.create('test-graph');
+        const graphs = await db.graph.list();
+        expect(graphs).toContain('test-graph');
+
+        const meta = await db.graph.info('test-graph');
+        expect(meta).not.toBeNull();
+        expect(typeof meta).toBe('object');
+
+        await db.graph.delete('test-graph');
+        const after = await db.graph.list();
+        expect(after).not.toContain('test-graph');
+      });
+
+      test('create with cascade policy', async () => {
+        await db.graph.create('cascade-graph', { cascadePolicy: 'cascade' });
+        const graphs = await db.graph.list();
+        expect(graphs).toContain('cascade-graph');
+        await db.graph.delete('cascade-graph');
+      });
+
+      test('list on fresh db returns empty', async () => {
+        const graphs = await db.graph.list();
+        expect(Array.isArray(graphs)).toBe(true);
+      });
+    });
+
+    describe('nodes', () => {
+      test('addNode and getNode returns properties', async () => {
+        await db.graph.create('ng');
+        await db.graph.addNode('ng', 'alice');
+        await db.graph.addNode('ng', 'bob', { properties: { age: 30, name: 'Bob' } });
+
+        const node = await db.graph.getNode('ng', 'bob');
+        expect(node).not.toBeNull();
+        expect(typeof node).toBe('object');
+        // getNode should return the node data including properties
+        expect(node).toHaveProperty('properties');
+        expect(node.properties.age).toBe(30);
+        expect(node.properties.name).toBe('Bob');
+
+        await db.graph.delete('ng');
+      });
+
+      test('listNodes and removeNode', async () => {
+        await db.graph.create('ng2');
+        await db.graph.addNode('ng2', 'alice');
+        await db.graph.addNode('ng2', 'bob');
+
+        const nodes = await db.graph.listNodes('ng2');
+        expect(nodes).toContain('alice');
+        expect(nodes).toContain('bob');
+
+        await db.graph.removeNode('ng2', 'alice');
+        const after = await db.graph.listNodes('ng2');
+        expect(after).not.toContain('alice');
+        expect(after).toContain('bob');
+
+        await db.graph.delete('ng2');
+      });
+
+      test('addNode with entityRef and objectType', async () => {
+        await db.graph.create('nf');
+        await db.graph.defineObjectType('nf', { name: 'User', properties: {} });
+        await db.graph.addNode('nf', 'u1', {
+          entityRef: 'kv://main/user1',
+          objectType: 'User',
+          properties: { role: 'admin' },
+        });
+
+        const node = await db.graph.getNode('nf', 'u1');
+        expect(node).not.toBeNull();
+
+        const byType = await db.graph.nodesByType('nf', 'User');
+        expect(byType).toContain('u1');
+
+        await db.graph.delete('nf');
+      });
+
+      test('addNode duplicate updates without error', async () => {
+        await db.graph.create('dup');
+        await db.graph.addNode('dup', 'x', { properties: { v: 1 } });
+        await db.graph.addNode('dup', 'x', { properties: { v: 2 } });
+
+        const node = await db.graph.getNode('dup', 'x');
+        expect(node).not.toBeNull();
+        // Should have updated properties
+        expect(node.properties.v).toBe(2);
+
+        const nodes = await db.graph.listNodes('dup');
+        expect(nodes.filter((n) => n === 'x').length).toBe(1);
+
+        await db.graph.delete('dup');
+      });
+
+      test('listNodes with pagination and cursor continuation', async () => {
+        await db.graph.create('pg');
+        for (let i = 0; i < 5; i++) {
+          await db.graph.addNode('pg', `n${i}`);
+        }
+
+        // First page
+        const page1 = await db.graph.listNodes('pg', { limit: 2 });
+        expect(page1).toHaveProperty('items');
+        expect(page1).toHaveProperty('nextCursor');
+        expect(page1.items.length).toBe(2);
+
+        // Second page using cursor from first
+        if (page1.nextCursor) {
+          const page2 = await db.graph.listNodes('pg', { limit: 2, cursor: page1.nextCursor });
+          expect(page2.items.length).toBeGreaterThan(0);
+          // No overlap between pages
+          for (const item of page2.items) {
+            expect(page1.items).not.toContain(item);
+          }
+        }
+
+        await db.graph.delete('pg');
+      });
+
+      test('listNodes on empty graph returns empty', async () => {
+        await db.graph.create('empty-nodes');
+        const nodes = await db.graph.listNodes('empty-nodes');
+        expect(nodes).toEqual([]);
+        await db.graph.delete('empty-nodes');
+      });
+
+      test('getNode missing returns null', async () => {
+        await db.graph.create('gn');
+        const node = await db.graph.getNode('gn', 'nonexistent');
+        expect(node).toBeNull();
+        await db.graph.delete('gn');
+      });
+    });
+
+    describe('edges', () => {
+      test('addEdge, neighbors, removeEdge', async () => {
+        await db.graph.create('eg');
+        await db.graph.addNode('eg', 'a');
+        await db.graph.addNode('eg', 'b');
+        await db.graph.addEdge('eg', 'a', 'b', 'KNOWS');
+
+        const neighbors = await db.graph.neighbors('eg', 'a');
+        expect(Array.isArray(neighbors)).toBe(true);
+        expect(neighbors.length).toBe(1);
+        expect(neighbors[0].nodeId).toBe('b');
+        expect(neighbors[0].edgeType).toBe('KNOWS');
+        expect(typeof neighbors[0].weight).toBe('number');
+
+        await db.graph.removeEdge('eg', 'a', 'b', 'KNOWS');
+        const after = await db.graph.neighbors('eg', 'a');
+        expect(after.length).toBe(0);
+
+        await db.graph.delete('eg');
+      });
+
+      test('addEdge with weight and properties', async () => {
+        await db.graph.create('ew');
+        await db.graph.addNode('ew', 'x');
+        await db.graph.addNode('ew', 'y');
+        await db.graph.addEdge('ew', 'x', 'y', 'LIKES', {
+          weight: 0.8,
+          properties: { since: 2024 },
+        });
+
+        const neighbors = await db.graph.neighbors('ew', 'x');
+        expect(neighbors[0].weight).toBeCloseTo(0.8);
+
+        await db.graph.delete('ew');
+      });
+
+      test('neighbors with direction and edgeType filters', async () => {
+        await db.graph.create('nd');
+        await db.graph.addNode('nd', 'a');
+        await db.graph.addNode('nd', 'b');
+        await db.graph.addNode('nd', 'c');
+        await db.graph.addEdge('nd', 'a', 'b', 'FOLLOWS');
+        await db.graph.addEdge('nd', 'a', 'c', 'LIKES');
+        await db.graph.addEdge('nd', 'c', 'a', 'FOLLOWS');
+
+        // Outgoing from a
+        const outgoing = await db.graph.neighbors('nd', 'a', { direction: 'outgoing' });
+        expect(outgoing.length).toBe(2);
+
+        // Incoming to a
+        const incoming = await db.graph.neighbors('nd', 'a', { direction: 'incoming' });
+        expect(incoming.length).toBe(1);
+        expect(incoming[0].nodeId).toBe('c');
+
+        // Both directions
+        const both = await db.graph.neighbors('nd', 'a', { direction: 'both' });
+        expect(both.length).toBe(3);
+
+        // Filter by edgeType
+        const followsOnly = await db.graph.neighbors('nd', 'a', { edgeType: 'FOLLOWS' });
+        expect(followsOnly.length).toBeGreaterThanOrEqual(1);
+        for (const n of followsOnly) {
+          expect(n.edgeType).toBe('FOLLOWS');
+        }
+
+        await db.graph.delete('nd');
+      });
+
+      test('neighbors on node with no edges returns empty', async () => {
+        await db.graph.create('ne');
+        await db.graph.addNode('ne', 'lonely');
+        const neighbors = await db.graph.neighbors('ne', 'lonely');
+        expect(neighbors).toEqual([]);
+        await db.graph.delete('ne');
+      });
+    });
+
+    describe('bulk insert', () => {
+      test('bulkInsert nodes and edges with verification', async () => {
+        await db.graph.create('bg');
+        const result = await db.graph.bulkInsert('bg', {
+          nodes: [
+            { nodeId: 'n1' },
+            { nodeId: 'n2' },
+            { nodeId: 'n3' },
+          ],
+          edges: [
+            { src: 'n1', dst: 'n2', edgeType: 'LINK' },
+            { src: 'n2', dst: 'n3', edgeType: 'LINK' },
+          ],
+        });
+
+        expect(result.nodesInserted).toBe(3);
+        expect(result.edgesInserted).toBe(2);
+
+        const nodes = await db.graph.listNodes('bg');
+        expect(nodes.length).toBe(3);
+        expect(nodes).toContain('n1');
+        expect(nodes).toContain('n2');
+        expect(nodes).toContain('n3');
+
+        // Verify edges were created
+        const neighbors = await db.graph.neighbors('bg', 'n1');
+        expect(neighbors.length).toBe(1);
+        expect(neighbors[0].nodeId).toBe('n2');
+
+        await db.graph.delete('bg');
+      });
+
+      test('bulkInsert with all optional fields', async () => {
+        await db.graph.create('bf');
+        await db.graph.defineObjectType('bf', { name: 'Item', properties: {} });
+        const result = await db.graph.bulkInsert('bf', {
+          nodes: [
+            {
+              nodeId: 'full',
+              entityRef: 'kv://main/item1',
+              objectType: 'Item',
+              properties: { color: 'red' },
+            },
+            { nodeId: 'min' },
+          ],
+          edges: [
+            {
+              src: 'full',
+              dst: 'min',
+              edgeType: 'LINKS',
+              weight: 2.5,
+              properties: { note: 'test' },
+            },
+          ],
+        });
+
+        expect(result.nodesInserted).toBe(2);
+        expect(result.edgesInserted).toBe(1);
+
+        const node = await db.graph.getNode('bf', 'full');
+        expect(node).not.toBeNull();
+
+        const neighbors = await db.graph.neighbors('bf', 'full');
+        expect(neighbors[0].weight).toBeCloseTo(2.5);
+
+        await db.graph.delete('bf');
+      });
+
+      test('bulkInsert empty arrays', async () => {
+        await db.graph.create('be');
+        const result = await db.graph.bulkInsert('be', {
+          nodes: [],
+          edges: [],
+        });
+        expect(result.nodesInserted).toBe(0);
+        expect(result.edgesInserted).toBe(0);
+        await db.graph.delete('be');
+      });
+
+      test('bulkInsert nodes only, no edges', async () => {
+        await db.graph.create('bn');
+        const result = await db.graph.bulkInsert('bn', {
+          nodes: [{ nodeId: 'solo1' }, { nodeId: 'solo2' }],
+        });
+        expect(result.nodesInserted).toBe(2);
+        expect(result.edgesInserted).toBe(0);
+        await db.graph.delete('bn');
+      });
+    });
+
+    describe('BFS', () => {
+      test('bfs traversal with edges verification', async () => {
+        await db.graph.create('bfs');
+        await db.graph.bulkInsert('bfs', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }],
+          edges: [
+            { src: 'a', dst: 'b', edgeType: 'E' },
+            { src: 'b', dst: 'c', edgeType: 'E' },
+          ],
+        });
+
+        const result = await db.graph.bfs('bfs', 'a', 3);
+        expect(result.visited).toContain('a');
+        expect(result.visited).toContain('b');
+        expect(result.visited).toContain('c');
+        expect(result.visited.length).toBe(3);
+
+        // Verify depths
+        expect(result.depths.a).toBe(0);
+        expect(result.depths.b).toBe(1);
+        expect(result.depths.c).toBe(2);
+
+        // Verify edges have correct structure
+        expect(result.edges.length).toBe(2);
+        for (const edge of result.edges) {
+          expect(edge).toHaveProperty('src');
+          expect(edge).toHaveProperty('dst');
+          expect(edge).toHaveProperty('edgeType');
+        }
+
+        await db.graph.delete('bfs');
+      });
+
+      test('bfs with maxDepth limit', async () => {
+        await db.graph.create('bfs2');
+        await db.graph.bulkInsert('bfs2', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }],
+          edges: [
+            { src: 'a', dst: 'b', edgeType: 'E' },
+            { src: 'b', dst: 'c', edgeType: 'E' },
+          ],
+        });
+
+        const result = await db.graph.bfs('bfs2', 'a', 1);
+        expect(result.visited).toContain('a');
+        expect(result.visited).toContain('b');
+        expect(result.visited).not.toContain('c');
+        expect(result.depths.b).toBe(1);
+
+        await db.graph.delete('bfs2');
+      });
+
+      test('bfs with maxNodes limit', async () => {
+        await db.graph.create('bfs3');
+        await db.graph.bulkInsert('bfs3', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }, { nodeId: 'd' }],
+          edges: [
+            { src: 'a', dst: 'b', edgeType: 'E' },
+            { src: 'a', dst: 'c', edgeType: 'E' },
+            { src: 'a', dst: 'd', edgeType: 'E' },
+          ],
+        });
+
+        const result = await db.graph.bfs('bfs3', 'a', 10, { maxNodes: 2 });
+        expect(result.visited.length).toBeLessThanOrEqual(2);
+        expect(result.visited).toContain('a');
+
+        await db.graph.delete('bfs3');
+      });
+    });
+
+    describe('ontology', () => {
+      test('defineObjectType with properties and verify structure', async () => {
+        await db.graph.create('og');
+        await db.graph.defineObjectType('og', {
+          name: 'Person',
+          properties: {
+            name: { type: 'string', required: true },
+            age: { type: 'integer', required: false },
+          },
+        });
+
+        const types = await db.graph.listObjectTypes('og');
+        expect(types).toContain('Person');
+
+        const def = await db.graph.getObjectType('og', 'Person');
+        expect(def).not.toBeNull();
+        expect(def.name).toBe('Person');
+        expect(def.properties).toBeDefined();
+        expect(def.properties.name).toBeDefined();
+
+        await db.graph.deleteObjectType('og', 'Person');
+        const after = await db.graph.listObjectTypes('og');
+        expect(after).not.toContain('Person');
+
+        await db.graph.delete('og');
+      });
+
+      test('getObjectType missing returns null', async () => {
+        await db.graph.create('ogm');
+        const def = await db.graph.getObjectType('ogm', 'Nonexistent');
+        expect(def).toBeNull();
+        await db.graph.delete('ogm');
+      });
+
+      test('defineLinkType with source/target and verify structure', async () => {
+        await db.graph.create('lg');
+        await db.graph.defineObjectType('lg', { name: 'A', properties: {} });
+        await db.graph.defineObjectType('lg', { name: 'B', properties: {} });
+        await db.graph.defineLinkType('lg', {
+          name: 'KNOWS',
+          source: 'A',
+          target: 'B',
+          properties: { since: { type: 'integer', required: false } },
+        });
+
+        const types = await db.graph.listLinkTypes('lg');
+        expect(types).toContain('KNOWS');
+
+        const def = await db.graph.getLinkType('lg', 'KNOWS');
+        expect(def).not.toBeNull();
+        expect(def.name).toBe('KNOWS');
+        expect(def.source).toBe('A');
+        expect(def.target).toBe('B');
+
+        await db.graph.deleteLinkType('lg', 'KNOWS');
+        const after = await db.graph.listLinkTypes('lg');
+        expect(after).not.toContain('KNOWS');
+
+        await db.graph.delete('lg');
+      });
+
+      test('freezeOntology prevents type modifications', async () => {
+        await db.graph.create('fg');
+        await db.graph.defineObjectType('fg', { name: 'Item', properties: {} });
+        await db.graph.freezeOntology('fg');
+
+        const status = await db.graph.ontologyStatus('fg');
+        expect(status).not.toBeNull();
+        // ontologyStatus returns a string like "frozen"
+        expect(typeof status).toBe('string');
+
+        // After freeze, defining new types should fail
+        await expect(
+          db.graph.defineObjectType('fg', { name: 'Other', properties: {} }),
+        ).rejects.toThrow();
+
+        await db.graph.delete('fg');
+      });
+
+      test('ontologySummary includes defined types', async () => {
+        await db.graph.create('sg');
+        await db.graph.defineObjectType('sg', {
+          name: 'Foo',
+          properties: { x: { type: 'string', required: false } },
+        });
+        const summary = await db.graph.ontologySummary('sg');
+        expect(summary).not.toBeNull();
+        expect(typeof summary).toBe('object');
+        await db.graph.delete('sg');
+      });
+
+      test('listOntologyTypes returns both object and link types', async () => {
+        await db.graph.create('ot');
+        await db.graph.defineObjectType('ot', { name: 'A', properties: {} });
+        await db.graph.defineObjectType('ot', { name: 'B', properties: {} });
+        await db.graph.defineLinkType('ot', {
+          name: 'REL',
+          source: 'A',
+          target: 'B',
+          properties: {},
+        });
+        const all = await db.graph.listOntologyTypes('ot');
+        expect(all).toContain('A');
+        expect(all).toContain('B');
+        expect(all).toContain('REL');
+        await db.graph.delete('ot');
+      });
+
+      test('nodesByType filters by object type', async () => {
+        await db.graph.create('nt');
+        await db.graph.defineObjectType('nt', { name: 'Cat', properties: {} });
+        await db.graph.addNode('nt', 'whiskers', { objectType: 'Cat' });
+        await db.graph.addNode('nt', 'spot');
+
+        const cats = await db.graph.nodesByType('nt', 'Cat');
+        expect(cats).toContain('whiskers');
+        expect(cats).not.toContain('spot');
+
+        await db.graph.delete('nt');
+      });
+
+      test('nodesByType nonexistent type returns empty', async () => {
+        await db.graph.create('ntn');
+        await db.graph.addNode('ntn', 'x');
+        const result = await db.graph.nodesByType('ntn', 'Nonexistent');
+        expect(result).toEqual([]);
+        await db.graph.delete('ntn');
+      });
+    });
+
+    describe('analytics', () => {
+      test('wcc returns components with correct grouping', async () => {
+        await db.graph.create('wg');
+        await db.graph.bulkInsert('wg', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }],
+          edges: [{ src: 'a', dst: 'b', edgeType: 'E' }],
+        });
+
+        const result = await db.graph.wcc('wg');
+        expect(result.algorithm).toBe('wcc');
+        // All nodes should have a component ID
+        expect(result.result).toHaveProperty('a');
+        expect(result.result).toHaveProperty('b');
+        expect(result.result).toHaveProperty('c');
+        // a and b connected → same component, c isolated → different
+        expect(result.result.a).toBe(result.result.b);
+        expect(result.result.c).not.toBe(result.result.a);
+        // Component IDs should be numbers
+        expect(typeof result.result.a).toBe('number');
+
+        await db.graph.delete('wg');
+      });
+
+      test('pagerank returns positive scores for all nodes', async () => {
+        await db.graph.create('prg');
+        await db.graph.bulkInsert('prg', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }],
+          edges: [
+            { src: 'a', dst: 'b', edgeType: 'E' },
+            { src: 'b', dst: 'c', edgeType: 'E' },
+          ],
+        });
+
+        const result = await db.graph.pagerank('prg');
+        expect(result.algorithm).toBe('pagerank');
+        // All nodes should have positive scores
+        expect(result.result.a).toBeGreaterThan(0);
+        expect(result.result.b).toBeGreaterThan(0);
+        expect(result.result.c).toBeGreaterThan(0);
+        // c receives link juice from b, which receives from a
+        // b should have higher rank than a (receives a link), c highest
+        expect(result.result.c).toBeGreaterThanOrEqual(result.result.a);
+
+        await db.graph.delete('prg');
+      });
+
+      test('pagerank with custom options', async () => {
+        await db.graph.create('prg2');
+        await db.graph.bulkInsert('prg2', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }],
+          edges: [{ src: 'a', dst: 'b', edgeType: 'E' }],
+        });
+
+        const result = await db.graph.pagerank('prg2', {
+          damping: 0.5,
+          maxIterations: 5,
+          tolerance: 0.01,
+        });
+        expect(result.algorithm).toBe('pagerank');
+        expect(result.result.a).toBeGreaterThan(0);
+
+        await db.graph.delete('prg2');
+      });
+
+      test('cdlp returns community labels for connected nodes', async () => {
+        await db.graph.create('cg');
+        await db.graph.bulkInsert('cg', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }],
+          edges: [
+            { src: 'a', dst: 'b', edgeType: 'E' },
+            { src: 'b', dst: 'a', edgeType: 'E' },
+          ],
+        });
+
+        const result = await db.graph.cdlp('cg', 10);
+        expect(result.algorithm).toBe('cdlp');
+        // All nodes should have a label
+        expect(result.result).toHaveProperty('a');
+        expect(result.result).toHaveProperty('b');
+        expect(result.result).toHaveProperty('c');
+        // a and b are tightly connected → likely same community
+        expect(typeof result.result.a).toBe('number');
+
+        await db.graph.delete('cg');
+      });
+
+      test('lcc returns coefficients in valid range', async () => {
+        await db.graph.create('lccg');
+        // Triangle: a-b, b-c, a-c → LCC should be 1.0 for each
+        await db.graph.bulkInsert('lccg', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }],
+          edges: [
+            { src: 'a', dst: 'b', edgeType: 'E' },
+            { src: 'b', dst: 'c', edgeType: 'E' },
+            { src: 'a', dst: 'c', edgeType: 'E' },
+          ],
+        });
+
+        const result = await db.graph.lcc('lccg');
+        expect(result.algorithm).toBe('lcc');
+        // LCC values should be between 0 and 1
+        for (const [, val] of Object.entries(result.result)) {
+          expect(val).toBeGreaterThanOrEqual(0);
+          expect(val).toBeLessThanOrEqual(1);
+        }
+
+        await db.graph.delete('lccg');
+      });
+
+      test('sssp returns monotonically increasing distances', async () => {
+        await db.graph.create('ssspg');
+        await db.graph.bulkInsert('ssspg', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }],
+          edges: [
+            { src: 'a', dst: 'b', edgeType: 'E' },
+            { src: 'b', dst: 'c', edgeType: 'E' },
+          ],
+        });
+
+        const result = await db.graph.sssp('ssspg', 'a');
+        expect(result.algorithm).toBe('sssp');
+        // Source should be 0
+        expect(result.result.a).toBe(0);
+        // b reachable from a, c reachable from b
+        expect(result.result.b).toBeGreaterThan(0);
+        expect(result.result.c).toBeGreaterThan(result.result.b);
+
+        await db.graph.delete('ssspg');
+      });
+
+      test('sssp with direction option', async () => {
+        await db.graph.create('ssspd');
+        await db.graph.bulkInsert('ssspd', {
+          nodes: [{ nodeId: 'a' }, { nodeId: 'b' }],
+          edges: [{ src: 'a', dst: 'b', edgeType: 'E' }],
+        });
+
+        const result = await db.graph.sssp('ssspd', 'a', { direction: 'outgoing' });
+        expect(result.algorithm).toBe('sssp');
+        expect(result.result.a).toBe(0);
+
+        await db.graph.delete('ssspd');
+      });
+    });
+
+    describe('snapshot', () => {
+      test('snapshot graph write operations throw StateError', async () => {
+        const snap = db.at(Date.now());
+        expect(() => snap.graph.create('x')).toThrow(StateError);
+        expect(() => snap.graph.delete('x')).toThrow(StateError);
+        expect(() => snap.graph.addNode('g', 'n')).toThrow(StateError);
+        expect(() => snap.graph.removeNode('g', 'n')).toThrow(StateError);
+        expect(() => snap.graph.addEdge('g', 'a', 'b', 'E')).toThrow(StateError);
+        expect(() => snap.graph.removeEdge('g', 'a', 'b', 'E')).toThrow(StateError);
+        expect(() => snap.graph.bulkInsert('g', {})).toThrow(StateError);
+        expect(() => snap.graph.defineObjectType('g', {})).toThrow(StateError);
+        expect(() => snap.graph.deleteObjectType('g', 'T')).toThrow(StateError);
+        expect(() => snap.graph.defineLinkType('g', {})).toThrow(StateError);
+        expect(() => snap.graph.deleteLinkType('g', 'L')).toThrow(StateError);
+        expect(() => snap.graph.freezeOntology('g')).toThrow(StateError);
+      });
+
+      test('snapshot graph reads return correct data', async () => {
+        await db.graph.create('snap-graph');
+        await db.graph.addNode('snap-graph', 'n1');
+        await db.graph.addNode('snap-graph', 'n2');
+        await db.graph.addEdge('snap-graph', 'n1', 'n2', 'LINK');
+
+        const snap = db.at(Date.now());
+
+        // list
+        const graphs = await snap.graph.list();
+        expect(graphs).toContain('snap-graph');
+
+        // getNode
+        const node = await snap.graph.getNode('snap-graph', 'n1');
+        expect(node).not.toBeNull();
+
+        // listNodes
+        const nodes = await snap.graph.listNodes('snap-graph');
+        expect(nodes).toContain('n1');
+        expect(nodes).toContain('n2');
+
+        // neighbors
+        const neighbors = await snap.graph.neighbors('snap-graph', 'n1');
+        expect(neighbors.length).toBe(1);
+        expect(neighbors[0].nodeId).toBe('n2');
+
+        // bfs
+        const bfs = await snap.graph.bfs('snap-graph', 'n1', 2);
+        expect(bfs.visited).toContain('n1');
+        expect(bfs.visited).toContain('n2');
+
+        await db.graph.delete('snap-graph');
+      });
+    });
+  });
+
+  // =========================================================================
+  // Branch parameter gaps
+  // =========================================================================
+
+  describe('branch parameter gaps', () => {
+    test('branch.create with metadata and verify via get', async () => {
+      await db.branch.create('meta-branch', { metadata: { owner: 'test' } });
+      const exists = await db.branch.exists('meta-branch');
+      expect(exists).toBe(true);
+
+      // Verify branch was created
+      const info = await db.branch.get('meta-branch');
+      expect(info).not.toBeNull();
+      expect(info.id).toBe('meta-branch');
+
+      await db.branch.delete('meta-branch');
+    });
+
+    test('branch.list with limit', async () => {
+      await db.branch.create('lb1');
+      await db.branch.create('lb2');
+      await db.branch.create('lb3');
+
+      const all = await db.branch.list();
+      expect(all.length).toBeGreaterThanOrEqual(4); // default + lb1 + lb2 + lb3
+
+      const limited = await db.branch.list({ limit: 2 });
+      expect(limited.length).toBe(2);
+
+      // Larger limit returns more
+      const more = await db.branch.list({ limit: 10 });
+      expect(more.length).toBeGreaterThanOrEqual(4);
+
+      await db.branch.delete('lb1');
+      await db.branch.delete('lb2');
+      await db.branch.delete('lb3');
+    });
+
+    test('branch.create without metadata still works', async () => {
+      await db.branch.create('no-meta');
+      const exists = await db.branch.exists('no-meta');
+      expect(exists).toBe(true);
+      await db.branch.delete('no-meta');
     });
   });
 

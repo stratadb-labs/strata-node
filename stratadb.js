@@ -79,6 +79,10 @@ class KvNamespace {
   getVersioned(key) {
     return this._db.kvGetVersioned(key);
   }
+
+  batchPut(entries) {
+    return this._db.kvBatchPut(entries);
+  }
 }
 
 class StateNamespace {
@@ -117,6 +121,10 @@ class StateNamespace {
   getVersioned(cell) {
     return this._db.stateGetVersioned(cell);
   }
+
+  batchSet(entries) {
+    return this._db.stateBatchSet(entries);
+  }
 }
 
 class EventsNamespace {
@@ -144,6 +152,10 @@ class EventsNamespace {
 
   count() {
     return this._db.eventLen();
+  }
+
+  batchAppend(entries) {
+    return this._db.eventBatchAppend(entries);
   }
 }
 
@@ -175,6 +187,18 @@ class JsonNamespace {
 
   getVersioned(key) {
     return this._db.jsonGetVersioned(key);
+  }
+
+  batchSet(entries) {
+    return this._db.jsonBatchSet(entries);
+  }
+
+  batchGet(entries) {
+    return this._db.jsonBatchGet(entries);
+  }
+
+  batchDelete(entries) {
+    return this._db.jsonBatchDelete(entries);
   }
 }
 
@@ -240,16 +264,16 @@ class BranchNamespace {
     return this._db.setBranch(name);
   }
 
-  create(name) {
-    return this._db.createBranch(name);
+  create(name, opts) {
+    return this._db.createBranch(name, opts?.metadata);
   }
 
   fork(destination) {
     return this._db.forkBranch(destination);
   }
 
-  list() {
-    return this._db.listBranches();
+  list(opts) {
+    return this._db.listBranches(opts?.limit, opts?.offset);
   }
 
   delete(name) {
@@ -318,6 +342,158 @@ class SpaceNamespace {
   }
 }
 
+class GraphNamespace {
+  constructor(db) {
+    this._db = db;
+  }
+
+  // Lifecycle
+  create(name, opts) {
+    return this._db.graphCreate(name, opts?.cascadePolicy);
+  }
+
+  delete(name) {
+    return this._db.graphDelete(name);
+  }
+
+  list() {
+    return this._db.graphList();
+  }
+
+  info(name) {
+    return this._db.graphGetMeta(name);
+  }
+
+  // Nodes
+  addNode(graph, nodeId, opts) {
+    return this._db.graphAddNode(
+      graph, nodeId, opts?.entityRef, opts?.properties, opts?.objectType,
+    );
+  }
+
+  getNode(graph, nodeId) {
+    return this._db.graphGetNode(graph, nodeId);
+  }
+
+  removeNode(graph, nodeId) {
+    return this._db.graphRemoveNode(graph, nodeId);
+  }
+
+  listNodes(graph, opts) {
+    if (opts?.limit != null) {
+      return this._db.graphListNodesPaginated(graph, opts.limit, opts?.cursor);
+    }
+    return this._db.graphListNodes(graph);
+  }
+
+  // Edges
+  addEdge(graph, src, dst, edgeType, opts) {
+    return this._db.graphAddEdge(
+      graph, src, dst, edgeType, opts?.weight, opts?.properties,
+    );
+  }
+
+  removeEdge(graph, src, dst, edgeType) {
+    return this._db.graphRemoveEdge(graph, src, dst, edgeType);
+  }
+
+  neighbors(graph, nodeId, opts) {
+    return this._db.graphNeighbors(
+      graph, nodeId, opts?.direction, opts?.edgeType,
+    );
+  }
+
+  // Bulk & Traversal
+  bulkInsert(graph, data, opts) {
+    return this._db.graphBulkInsert(
+      graph, data?.nodes ?? [], data?.edges ?? [], opts?.chunkSize,
+    );
+  }
+
+  bfs(graph, start, maxDepth, opts) {
+    return this._db.graphBfs(
+      graph, start, maxDepth,
+      opts?.maxNodes, opts?.edgeTypes, opts?.direction,
+    );
+  }
+
+  // Ontology
+  defineObjectType(graph, definition) {
+    return this._db.graphDefineObjectType(graph, definition);
+  }
+
+  getObjectType(graph, name) {
+    return this._db.graphGetObjectType(graph, name);
+  }
+
+  listObjectTypes(graph) {
+    return this._db.graphListObjectTypes(graph);
+  }
+
+  deleteObjectType(graph, name) {
+    return this._db.graphDeleteObjectType(graph, name);
+  }
+
+  defineLinkType(graph, definition) {
+    return this._db.graphDefineLinkType(graph, definition);
+  }
+
+  getLinkType(graph, name) {
+    return this._db.graphGetLinkType(graph, name);
+  }
+
+  listLinkTypes(graph) {
+    return this._db.graphListLinkTypes(graph);
+  }
+
+  deleteLinkType(graph, name) {
+    return this._db.graphDeleteLinkType(graph, name);
+  }
+
+  freezeOntology(graph) {
+    return this._db.graphFreezeOntology(graph);
+  }
+
+  ontologyStatus(graph) {
+    return this._db.graphOntologyStatus(graph);
+  }
+
+  ontologySummary(graph) {
+    return this._db.graphOntologySummary(graph);
+  }
+
+  listOntologyTypes(graph) {
+    return this._db.graphListOntologyTypes(graph);
+  }
+
+  nodesByType(graph, objectType) {
+    return this._db.graphNodesByType(graph, objectType);
+  }
+
+  // Analytics
+  wcc(graph) {
+    return this._db.graphWcc(graph);
+  }
+
+  cdlp(graph, maxIterations, opts) {
+    return this._db.graphCdlp(graph, maxIterations, opts?.direction);
+  }
+
+  pagerank(graph, opts) {
+    return this._db.graphPagerank(
+      graph, opts?.damping, opts?.maxIterations, opts?.tolerance,
+    );
+  }
+
+  lcc(graph) {
+    return this._db.graphLcc(graph);
+  }
+
+  sssp(graph, source, opts) {
+    return this._db.graphSssp(graph, source, opts?.direction);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Read-only snapshot namespace classes — same read methods, writes throw.
 // ---------------------------------------------------------------------------
@@ -333,6 +509,7 @@ class KvSnapshot {
   }
 
   set() { readOnlyWrite(); }
+  batchPut() { readOnlyWrite(); }
 
   get(key) {
     return this._db.kvGet(key, this._asOf);
@@ -365,6 +542,7 @@ class StateSnapshot {
   }
 
   set() { readOnlyWrite(); }
+  batchSet() { readOnlyWrite(); }
 
   get(cell) {
     return this._db.stateGet(cell, this._asOf);
@@ -394,6 +572,7 @@ class EventsSnapshot {
   }
 
   append() { readOnlyWrite(); }
+  batchAppend() { readOnlyWrite(); }
 
   get(sequence) {
     return this._db.eventGet(sequence, this._asOf);
@@ -420,6 +599,8 @@ class JsonSnapshot {
   }
 
   set() { readOnlyWrite(); }
+  batchSet() { readOnlyWrite(); }
+  batchDelete() { readOnlyWrite(); }
 
   get(key, path) {
     return this._db.jsonGet(key, path, this._asOf);
@@ -478,6 +659,56 @@ class VectorSnapshot {
   }
 }
 
+class GraphSnapshot {
+  constructor(db) {
+    this._db = db;
+  }
+
+  // Write operations throw
+  create() { readOnlyWrite(); }
+  delete() { readOnlyWrite(); }
+  addNode() { readOnlyWrite(); }
+  removeNode() { readOnlyWrite(); }
+  addEdge() { readOnlyWrite(); }
+  removeEdge() { readOnlyWrite(); }
+  bulkInsert() { readOnlyWrite(); }
+  defineObjectType() { readOnlyWrite(); }
+  deleteObjectType() { readOnlyWrite(); }
+  defineLinkType() { readOnlyWrite(); }
+  deleteLinkType() { readOnlyWrite(); }
+  freezeOntology() { readOnlyWrite(); }
+
+  // Read operations
+  list() { return this._db.graphList(); }
+  info(name) { return this._db.graphGetMeta(name); }
+  getNode(graph, nodeId) { return this._db.graphGetNode(graph, nodeId); }
+  listNodes(graph, opts) {
+    if (opts?.limit != null) {
+      return this._db.graphListNodesPaginated(graph, opts.limit, opts?.cursor);
+    }
+    return this._db.graphListNodes(graph);
+  }
+  neighbors(graph, nodeId, opts) {
+    return this._db.graphNeighbors(graph, nodeId, opts?.direction, opts?.edgeType);
+  }
+  bfs(graph, start, maxDepth, opts) {
+    return this._db.graphBfs(graph, start, maxDepth, opts?.maxNodes, opts?.edgeTypes, opts?.direction);
+  }
+  getObjectType(graph, name) { return this._db.graphGetObjectType(graph, name); }
+  listObjectTypes(graph) { return this._db.graphListObjectTypes(graph); }
+  getLinkType(graph, name) { return this._db.graphGetLinkType(graph, name); }
+  listLinkTypes(graph) { return this._db.graphListLinkTypes(graph); }
+  ontologyStatus(graph) { return this._db.graphOntologyStatus(graph); }
+  ontologySummary(graph) { return this._db.graphOntologySummary(graph); }
+  listOntologyTypes(graph) { return this._db.graphListOntologyTypes(graph); }
+  nodesByType(graph, objectType) { return this._db.graphNodesByType(graph, objectType); }
+  wcc(graph) { return this._db.graphWcc(graph); }
+  cdlp(graph, maxIterations, opts) { return this._db.graphCdlp(graph, maxIterations, opts?.direction); }
+  pagerank(graph, opts) { return this._db.graphPagerank(graph, opts?.damping, opts?.maxIterations, opts?.tolerance); }
+  lcc(graph) { return this._db.graphLcc(graph); }
+  sssp(graph, source, opts) { return this._db.graphSssp(graph, source, opts?.direction); }
+}
+
 // ---------------------------------------------------------------------------
 // StrataSnapshot — immutable time-travel view returned by db.at(timestamp)
 // ---------------------------------------------------------------------------
@@ -506,6 +737,10 @@ class StrataSnapshot {
 
   get vector() {
     return (this._vector ??= new VectorSnapshot(this._db, this._asOf));
+  }
+
+  get graph() {
+    return (this._graph ??= new GraphSnapshot(this._db));
   }
 }
 
@@ -543,6 +778,10 @@ Object.defineProperties(NativeStrata.prototype, {
   },
   space: {
     get() { return (this._space ??= new SpaceNamespace(this)); },
+    configurable: true,
+  },
+  graph: {
+    get() { return (this._graph ??= new GraphNamespace(this)); },
     configurable: true,
   },
 });

@@ -110,11 +110,11 @@ export declare class Strata {
   /** Switch to a different branch. */
   setBranch(branch: string): Promise<void>
   /** Create a new empty branch. */
-  createBranch(branch: string): Promise<void>
+  createBranch(branch: string, metadata?: any | undefined | null): Promise<void>
   /** Fork the current branch to a new branch, copying all data. */
   forkBranch(destination: string): Promise<any>
   /** List all branches. */
-  listBranches(): Promise<Array<string>>
+  listBranches(limit?: number | undefined | null, offset?: number | undefined | null): Promise<any>
   /** Delete a branch. */
   deleteBranch(branch: string): Promise<void>
   /** Check if a branch exists. */
@@ -218,4 +218,106 @@ export declare class Strata {
   close(): Promise<void>
   /** Get the time range (oldest and latest timestamps) for the current branch. */
   timeRange(): Promise<any>
+  /** Batch put multiple KV entries. */
+  kvBatchPut(entries: Array<any>): Promise<any>
+  /** Batch set multiple state cells. */
+  stateBatchSet(entries: Array<any>): Promise<any>
+  /** Batch append multiple events. */
+  eventBatchAppend(entries: Array<any>): Promise<any>
+  /** Batch set multiple JSON documents. */
+  jsonBatchSet(entries: Array<any>): Promise<any>
+  /** Batch get multiple JSON documents. */
+  jsonBatchGet(entries: Array<any>): Promise<any>
+  /** Batch delete multiple JSON documents. */
+  jsonBatchDelete(entries: Array<any>): Promise<any>
+  /** Set a configuration key-value pair. */
+  configureSet(key: string, value: string): Promise<void>
+  /** Get a configuration value by key. */
+  configureGet(key: string): Promise<string | null>
+  /** Embed a single text string. */
+  embed(text: string): Promise<Array<number>>
+  /** Embed multiple texts in a batch. */
+  embedBatch(texts: Array<string>): Promise<Array<Array<number>>>
+  /** Get the embedding pipeline status. */
+  embedStatus(): Promise<any>
+  /** Generate text from a model. */
+  generate(model: string, prompt: string, options?: any | undefined | null): Promise<any>
+  /** Tokenize text using a model's tokenizer. */
+  tokenize(model: string, text: string, options?: any | undefined | null): Promise<any>
+  /** Detokenize token IDs back to text. */
+  detokenize(model: string, ids: Array<number>): Promise<string>
+  /** Unload a model from memory. */
+  generateUnload(model: string): Promise<boolean>
+  /** List all available models. */
+  modelsList(): Promise<any>
+  /** Pull/download a model by name. */
+  modelsPull(name: string): Promise<any>
+  /** List locally downloaded models. */
+  modelsLocal(): Promise<any>
+  /** Get WAL durability counters. */
+  durabilityCounters(): Promise<any>
+  /** Create a new graph. */
+  graphCreate(graph: string, cascadePolicy?: string | undefined | null): Promise<void>
+  /** Delete a graph. */
+  graphDelete(graph: string): Promise<void>
+  /** List all graph names. */
+  graphList(): Promise<Array<string>>
+  /** Get graph metadata. */
+  graphGetMeta(graph: string): Promise<any>
+  /** Add or update a node. */
+  graphAddNode(graph: string, nodeId: string, entityRef?: string | undefined | null, properties?: any | undefined | null, objectType?: string | undefined | null): Promise<void>
+  /** Get a node. */
+  graphGetNode(graph: string, nodeId: string): Promise<any>
+  /** Remove a node and its incident edges. */
+  graphRemoveNode(graph: string, nodeId: string): Promise<void>
+  /** List all node IDs in a graph. */
+  graphListNodes(graph: string): Promise<Array<string>>
+  /** List node IDs with cursor-based pagination. */
+  graphListNodesPaginated(graph: string, limit: number, cursor?: string | undefined | null): Promise<any>
+  /** Add or update an edge. */
+  graphAddEdge(graph: string, src: string, dst: string, edgeType: string, weight?: number | undefined | null, properties?: any | undefined | null): Promise<void>
+  /** Remove an edge. */
+  graphRemoveEdge(graph: string, src: string, dst: string, edgeType: string): Promise<void>
+  /** Get neighbors of a node. */
+  graphNeighbors(graph: string, nodeId: string, direction?: string | undefined | null, edgeType?: string | undefined | null): Promise<any>
+  /** Bulk insert nodes and edges into a graph. */
+  graphBulkInsert(graph: string, nodes: Array<any>, edges: Array<any>, chunkSize?: number | undefined | null): Promise<any>
+  /** BFS traversal from a start node. */
+  graphBfs(graph: string, start: string, maxDepth: number, maxNodes?: number | undefined | null, edgeTypes?: Array<string> | undefined | null, direction?: string | undefined | null): Promise<any>
+  /** Define an object type in the graph ontology. */
+  graphDefineObjectType(graph: string, definition: any): Promise<void>
+  /** Get an object type definition. */
+  graphGetObjectType(graph: string, name: string): Promise<any>
+  /** List all object type names. */
+  graphListObjectTypes(graph: string): Promise<Array<string>>
+  /** Delete an object type definition. */
+  graphDeleteObjectType(graph: string, name: string): Promise<void>
+  /** Define a link type in the graph ontology. */
+  graphDefineLinkType(graph: string, definition: any): Promise<void>
+  /** Get a link type definition. */
+  graphGetLinkType(graph: string, name: string): Promise<any>
+  /** List all link type names. */
+  graphListLinkTypes(graph: string): Promise<Array<string>>
+  /** Delete a link type definition. */
+  graphDeleteLinkType(graph: string, name: string): Promise<void>
+  /** Freeze the graph ontology (no more type changes). */
+  graphFreezeOntology(graph: string): Promise<void>
+  /** Get the ontology status of a graph. */
+  graphOntologyStatus(graph: string): Promise<any>
+  /** Get a complete ontology summary. */
+  graphOntologySummary(graph: string): Promise<any>
+  /** List all ontology types (both object and link types). */
+  graphListOntologyTypes(graph: string): Promise<Array<string>>
+  /** Get all node IDs of a given object type. */
+  graphNodesByType(graph: string, objectType: string): Promise<Array<string>>
+  /** Weakly Connected Components. */
+  graphWcc(graph: string): Promise<any>
+  /** Community Detection via Label Propagation. */
+  graphCdlp(graph: string, maxIterations: number, direction?: string | undefined | null): Promise<any>
+  /** PageRank importance scoring. */
+  graphPagerank(graph: string, damping?: number | undefined | null, maxIterations?: number | undefined | null, tolerance?: number | undefined | null): Promise<any>
+  /** Local Clustering Coefficient. */
+  graphLcc(graph: string): Promise<any>
+  /** Single-Source Shortest Path (Dijkstra). */
+  graphSssp(graph: string, source: string, direction?: string | undefined | null): Promise<any>
 }

@@ -335,6 +335,287 @@ export interface TransactionOptions {
 }
 
 // =========================================================================
+// Batch result types
+// =========================================================================
+
+/** Result for a single item in a batch write operation */
+export interface BatchResult {
+  version: number | null;
+  error: string | null;
+}
+
+/** Result for a single item in a batch get operation */
+export interface BatchGetResult {
+  value: JsonValue;
+  version: number | null;
+  timestamp: number | null;
+  error: string | null;
+}
+
+// =========================================================================
+// Inference types
+// =========================================================================
+
+/** Options for text generation */
+export interface GenerateOptions {
+  maxTokens?: number;
+  temperature?: number;
+  topK?: number;
+  topP?: number;
+  seed?: number;
+  stopTokens?: number[];
+  stopSequences?: string[];
+}
+
+/** Options for tokenization */
+export interface TokenizeOptions {
+  addSpecialTokens?: boolean;
+}
+
+/** Text generation result */
+export interface GenerateResult {
+  text: string;
+  stopReason: string;
+  promptTokens: number;
+  completionTokens: number;
+  model: string;
+}
+
+/** Tokenization result */
+export interface TokenizeResult {
+  ids: number[];
+  count: number;
+  model: string;
+}
+
+// =========================================================================
+// Model types
+// =========================================================================
+
+/** Model information */
+export interface ModelInfo {
+  name: string;
+  task: string;
+  architecture: string;
+  defaultQuant: string;
+  embeddingDim: number;
+  isLocal: boolean;
+  sizeBytes: number;
+}
+
+/** Model pull/download result */
+export interface ModelPullResult {
+  name: string;
+  path: string;
+}
+
+// =========================================================================
+// Embedding status
+// =========================================================================
+
+/** Embedding pipeline status */
+export interface EmbedStatus {
+  autoEmbed: boolean;
+  batchSize: number;
+  pending: number;
+  totalQueued: number;
+  totalEmbedded: number;
+  totalFailed: number;
+  schedulerQueueDepth: number;
+  schedulerActiveTasks: number;
+}
+
+// =========================================================================
+// Durability types
+// =========================================================================
+
+/** WAL durability counters */
+export interface DurabilityCounters {
+  walAppends: number;
+  syncCalls: number;
+  bytesWritten: number;
+  syncNanos: number;
+}
+
+// =========================================================================
+// Batch entry types
+// =========================================================================
+
+/** Entry for batch KV put */
+export interface BatchKvEntry {
+  key: string;
+  value: JsonValue;
+}
+
+/** Entry for batch state set */
+export interface BatchStateEntry {
+  cell: string;
+  value: JsonValue;
+}
+
+/** Entry for batch event append */
+export interface BatchEventEntry {
+  /** Accepts both `eventType` (preferred) and `event_type`. */
+  eventType: string;
+  payload: JsonValue;
+}
+
+/** Entry for batch JSON set */
+export interface BatchJsonEntry {
+  key: string;
+  path: string;
+  value: JsonValue;
+}
+
+/** Entry for batch JSON get */
+export interface BatchJsonGetEntry {
+  key: string;
+  path: string;
+}
+
+/** Entry for batch JSON delete */
+export interface BatchJsonDeleteEntry {
+  key: string;
+  path: string;
+}
+
+// =========================================================================
+// Graph types
+// =========================================================================
+
+/** Graph neighbor query result */
+export interface GraphNeighborHit {
+  nodeId: string;
+  edgeType: string;
+  weight: number;
+}
+
+/** BFS traversal result */
+export interface GraphBfsResult {
+  visited: string[];
+  depths: Record<string, number>;
+  edges: Array<{ src: string; dst: string; edgeType: string }>;
+}
+
+/** Graph bulk insert result */
+export interface GraphBulkInsertResult {
+  nodesInserted: number;
+  edgesInserted: number;
+}
+
+/** Graph analytics result with integer values (WCC, CDLP) */
+export interface GraphAnalyticsU64Result {
+  algorithm: string;
+  result: Record<string, number>;
+}
+
+/** Graph analytics result with float values (PageRank, LCC, SSSP) */
+export interface GraphAnalyticsF64Result {
+  algorithm: string;
+  result: Record<string, number>;
+  iterations: number | null;
+}
+
+/** Graph paginated node list result */
+export interface GraphPage {
+  items: string[];
+  nextCursor: string | null;
+}
+
+/** Node for bulk graph insert */
+export interface BulkGraphNode {
+  nodeId: string;
+  entityRef?: string;
+  properties?: JsonValue;
+  objectType?: string;
+}
+
+/** Edge for bulk graph insert */
+export interface BulkGraphEdge {
+  src: string;
+  dst: string;
+  edgeType: string;
+  weight?: number;
+  properties?: JsonValue;
+}
+
+/** Options for graph creation */
+export interface GraphCreateOptions {
+  cascadePolicy?: string;
+}
+
+/** Options for adding a node */
+export interface GraphAddNodeOptions {
+  entityRef?: string;
+  properties?: JsonValue;
+  objectType?: string;
+}
+
+/** Options for listing nodes with pagination */
+export interface GraphListNodesOptions {
+  limit?: number;
+  cursor?: string;
+}
+
+/** Options for adding an edge */
+export interface GraphAddEdgeOptions {
+  weight?: number;
+  properties?: JsonValue;
+}
+
+/** Options for neighbor queries */
+export interface GraphNeighborOptions {
+  direction?: string;
+  edgeType?: string;
+}
+
+/** Data for bulk insert */
+export interface GraphBulkInsertData {
+  nodes?: BulkGraphNode[];
+  edges?: BulkGraphEdge[];
+}
+
+/** Options for bulk insert */
+export interface GraphBulkInsertOptions {
+  chunkSize?: number;
+}
+
+/** Options for BFS traversal */
+export interface GraphBfsOptions {
+  maxNodes?: number;
+  edgeTypes?: string[];
+  direction?: string;
+}
+
+/** Options for CDLP */
+export interface GraphCdlpOptions {
+  direction?: string;
+}
+
+/** Options for PageRank */
+export interface GraphPagerankOptions {
+  damping?: number;
+  maxIterations?: number;
+  tolerance?: number;
+}
+
+/** Options for SSSP */
+export interface GraphSsspOptions {
+  direction?: string;
+}
+
+/** Options for branch creation */
+export interface BranchCreateOptions {
+  metadata?: JsonValue;
+}
+
+/** Options for branch listing */
+export interface BranchListOptions {
+  limit?: number;
+  offset?: number;
+}
+
+// =========================================================================
 // Namespace interfaces
 // =========================================================================
 
@@ -346,6 +627,7 @@ export interface KvNamespace {
   keys(opts?: KvKeysOptions): Promise<string[]>;
   history(key: string): Promise<VersionedValue[] | null>;
   getVersioned(key: string): Promise<VersionedValue | null>;
+  batchPut(entries: BatchKvEntry[]): Promise<BatchResult[]>;
 }
 
 /** State Cell namespace — accessed via `db.state` */
@@ -358,6 +640,7 @@ export interface StateNamespace {
   keys(opts?: StateKeysOptions): Promise<string[]>;
   history(cell: string): Promise<VersionedValue[] | null>;
   getVersioned(cell: string): Promise<VersionedValue | null>;
+  batchSet(entries: BatchStateEntry[]): Promise<BatchResult[]>;
 }
 
 /** Event Log namespace — accessed via `db.events` */
@@ -366,6 +649,7 @@ export interface EventsNamespace {
   get(sequence: number, opts?: EventGetOptions): Promise<VersionedValue | null>;
   list(eventType: string, opts?: EventListOptions): Promise<VersionedValue[]>;
   count(): Promise<number>;
+  batchAppend(entries: BatchEventEntry[]): Promise<BatchResult[]>;
 }
 
 /** JSON Document namespace — accessed via `db.json` */
@@ -376,6 +660,9 @@ export interface JsonNamespace {
   keys(opts?: JsonKeysOptions): Promise<JsonListResult>;
   history(key: string): Promise<VersionedValue[] | null>;
   getVersioned(key: string): Promise<VersionedValue | null>;
+  batchSet(entries: BatchJsonEntry[]): Promise<BatchResult[]>;
+  batchGet(entries: BatchJsonGetEntry[]): Promise<BatchGetResult[]>;
+  batchDelete(entries: BatchJsonDeleteEntry[]): Promise<BatchResult[]>;
 }
 
 /** Vector Store namespace — accessed via `db.vector` */
@@ -395,9 +682,9 @@ export interface VectorNamespace {
 export interface BranchNamespace {
   current(): Promise<string>;
   switch(name: string): Promise<void>;
-  create(name: string): Promise<void>;
+  create(name: string, opts?: BranchCreateOptions): Promise<void>;
   fork(destination: string): Promise<ForkResult>;
-  list(): Promise<string[]>;
+  list(opts?: BranchListOptions): Promise<string[]>;
   delete(name: string): Promise<void>;
   exists(name: string): Promise<boolean>;
   get(name: string): Promise<BranchInfo | null>;
@@ -416,6 +703,52 @@ export interface SpaceNamespace {
   list(): Promise<string[]>;
   delete(name: string, opts?: SpaceDeleteOptions): Promise<void>;
   exists(name: string): Promise<boolean>;
+}
+
+/** Graph namespace — accessed via `db.graph` */
+export interface GraphNamespace {
+  // Lifecycle
+  create(name: string, opts?: GraphCreateOptions): Promise<void>;
+  delete(name: string): Promise<void>;
+  list(): Promise<string[]>;
+  info(name: string): Promise<JsonValue>;
+
+  // Nodes
+  addNode(graph: string, nodeId: string, opts?: GraphAddNodeOptions): Promise<void>;
+  getNode(graph: string, nodeId: string): Promise<JsonValue>;
+  removeNode(graph: string, nodeId: string): Promise<void>;
+  listNodes(graph: string, opts?: GraphListNodesOptions): Promise<string[] | GraphPage>;
+
+  // Edges
+  addEdge(graph: string, src: string, dst: string, edgeType: string, opts?: GraphAddEdgeOptions): Promise<void>;
+  removeEdge(graph: string, src: string, dst: string, edgeType: string): Promise<void>;
+  neighbors(graph: string, nodeId: string, opts?: GraphNeighborOptions): Promise<GraphNeighborHit[]>;
+
+  // Bulk & Traversal
+  bulkInsert(graph: string, data: GraphBulkInsertData, opts?: GraphBulkInsertOptions): Promise<GraphBulkInsertResult>;
+  bfs(graph: string, start: string, maxDepth: number, opts?: GraphBfsOptions): Promise<GraphBfsResult>;
+
+  // Ontology
+  defineObjectType(graph: string, definition: JsonValue): Promise<void>;
+  getObjectType(graph: string, name: string): Promise<JsonValue>;
+  listObjectTypes(graph: string): Promise<string[]>;
+  deleteObjectType(graph: string, name: string): Promise<void>;
+  defineLinkType(graph: string, definition: JsonValue): Promise<void>;
+  getLinkType(graph: string, name: string): Promise<JsonValue>;
+  listLinkTypes(graph: string): Promise<string[]>;
+  deleteLinkType(graph: string, name: string): Promise<void>;
+  freezeOntology(graph: string): Promise<void>;
+  ontologyStatus(graph: string): Promise<JsonValue>;
+  ontologySummary(graph: string): Promise<JsonValue>;
+  listOntologyTypes(graph: string): Promise<string[]>;
+  nodesByType(graph: string, objectType: string): Promise<string[]>;
+
+  // Analytics
+  wcc(graph: string): Promise<GraphAnalyticsU64Result>;
+  cdlp(graph: string, maxIterations: number, opts?: GraphCdlpOptions): Promise<GraphAnalyticsU64Result>;
+  pagerank(graph: string, opts?: GraphPagerankOptions): Promise<GraphAnalyticsF64Result>;
+  lcc(graph: string): Promise<GraphAnalyticsF64Result>;
+  sssp(graph: string, source: string, opts?: GraphSsspOptions): Promise<GraphAnalyticsF64Result>;
 }
 
 // =========================================================================
@@ -461,6 +794,29 @@ export interface VectorSnapshotNamespace {
   search(collection: string, query: number[], opts?: Omit<VectorSearchOptions, 'asOf'>): Promise<SearchMatch[]>;
 }
 
+/** Read-only Graph namespace for snapshots */
+export interface GraphSnapshotNamespace {
+  list(): Promise<string[]>;
+  info(name: string): Promise<JsonValue>;
+  getNode(graph: string, nodeId: string): Promise<JsonValue>;
+  listNodes(graph: string, opts?: GraphListNodesOptions): Promise<string[] | GraphPage>;
+  neighbors(graph: string, nodeId: string, opts?: GraphNeighborOptions): Promise<GraphNeighborHit[]>;
+  bfs(graph: string, start: string, maxDepth: number, opts?: GraphBfsOptions): Promise<GraphBfsResult>;
+  getObjectType(graph: string, name: string): Promise<JsonValue>;
+  listObjectTypes(graph: string): Promise<string[]>;
+  getLinkType(graph: string, name: string): Promise<JsonValue>;
+  listLinkTypes(graph: string): Promise<string[]>;
+  ontologyStatus(graph: string): Promise<JsonValue>;
+  ontologySummary(graph: string): Promise<JsonValue>;
+  listOntologyTypes(graph: string): Promise<string[]>;
+  nodesByType(graph: string, objectType: string): Promise<string[]>;
+  wcc(graph: string): Promise<GraphAnalyticsU64Result>;
+  cdlp(graph: string, maxIterations: number, opts?: GraphCdlpOptions): Promise<GraphAnalyticsU64Result>;
+  pagerank(graph: string, opts?: GraphPagerankOptions): Promise<GraphAnalyticsF64Result>;
+  lcc(graph: string): Promise<GraphAnalyticsF64Result>;
+  sssp(graph: string, source: string, opts?: GraphSsspOptions): Promise<GraphAnalyticsF64Result>;
+}
+
 /**
  * Immutable time-travel snapshot returned by `db.at(timestamp)`.
  * Only read operations are available; writes throw StateError.
@@ -471,6 +827,7 @@ export class StrataSnapshot {
   readonly events: EventsSnapshotNamespace;
   readonly json: JsonSnapshotNamespace;
   readonly vector: VectorSnapshotNamespace;
+  readonly graph: GraphSnapshotNamespace;
 }
 
 // =========================================================================
@@ -506,6 +863,8 @@ export class Strata {
   readonly branch: BranchNamespace;
   /** Space Management operations */
   readonly space: SpaceNamespace;
+  /** Graph operations */
+  readonly graph: GraphNamespace;
 
   // -----------------------------------------------------------------------
   // Time travel
@@ -565,6 +924,57 @@ export class Strata {
   rollback(): Promise<void>;
   txnInfo(): Promise<TransactionInfo | null>;
   txnIsActive(): Promise<boolean>;
+
+  // -----------------------------------------------------------------------
+  // Configuration (key-value)
+  // -----------------------------------------------------------------------
+
+  /** Set a configuration key-value pair. */
+  configureSet(key: string, value: string): Promise<void>;
+  /** Get a configuration value by key. */
+  configureGet(key: string): Promise<string | null>;
+
+  // -----------------------------------------------------------------------
+  // Embedding
+  // -----------------------------------------------------------------------
+
+  /** Embed a single text string. Returns a float vector. */
+  embed(text: string): Promise<number[]>;
+  /** Embed multiple texts in a batch. Returns an array of float vectors. */
+  embedBatch(texts: string[]): Promise<number[][]>;
+  /** Get the embedding pipeline status. */
+  embedStatus(): Promise<EmbedStatus>;
+
+  // -----------------------------------------------------------------------
+  // Inference
+  // -----------------------------------------------------------------------
+
+  /** Generate text from a model. */
+  generate(model: string, prompt: string, options?: GenerateOptions): Promise<GenerateResult>;
+  /** Tokenize text using a model's tokenizer. */
+  tokenize(model: string, text: string, options?: TokenizeOptions): Promise<TokenizeResult>;
+  /** Detokenize token IDs back to text. */
+  detokenize(model: string, ids: number[]): Promise<string>;
+  /** Unload a model from memory. */
+  generateUnload(model: string): Promise<boolean>;
+
+  // -----------------------------------------------------------------------
+  // Model Management
+  // -----------------------------------------------------------------------
+
+  /** List all available models. */
+  modelsList(): Promise<ModelInfo[]>;
+  /** Pull/download a model by name. */
+  modelsPull(name: string): Promise<ModelPullResult>;
+  /** List locally downloaded models. */
+  modelsLocal(): Promise<ModelInfo[]>;
+
+  // -----------------------------------------------------------------------
+  // Durability
+  // -----------------------------------------------------------------------
+
+  /** Get WAL durability counters. */
+  durabilityCounters(): Promise<DurabilityCounters>;
 
 }
 
