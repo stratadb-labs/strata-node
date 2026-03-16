@@ -3592,12 +3592,40 @@ impl Strata {
     }
 
     // =========================================================================
-    // System Branch — internal API for strata-ai
+    // System Branch
     // =========================================================================
 
-    /// Put a key-value pair on the `_system_` branch.
-    #[napi(js_name = "systemKvPut")]
-    pub async fn system_kv_put(&self, key: String, value: serde_json::Value) -> napi::Result<i64> {
+    /// Get a handle to the `_system_` branch.
+    ///
+    /// Returns a `SystemBranch` object with KV, JSON, state, and event
+    /// methods pre-bound to the internal `_system_` branch.
+    #[napi(js_name = "systemBranch")]
+    pub fn system_branch_handle(&self) -> SystemBranch {
+        SystemBranch {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+// =============================================================================
+// SystemBranch — handle pre-bound to the _system_ branch
+// =============================================================================
+
+/// Handle for operations on the internal `_system_` branch.
+///
+/// Obtained via `db.systemBranch()`. All operations are routed to the
+/// `_system_` branch regardless of the database's current branch context.
+#[napi]
+pub struct SystemBranch {
+    inner: Arc<Mutex<RustStrata>>,
+}
+
+#[napi]
+impl SystemBranch {
+    // -- KV --
+
+    #[napi(js_name = "kvPut")]
+    pub async fn kv_put(&self, key: String, value: serde_json::Value) -> napi::Result<i64> {
         let inner = self.inner.clone();
         let v = js_to_value_checked(value, 0)?;
         tokio::task::spawn_blocking(move || {
@@ -3612,9 +3640,8 @@ impl Strata {
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
     }
 
-    /// Get a value by key from the `_system_` branch.
-    #[napi(js_name = "systemKvGet")]
-    pub async fn system_kv_get(&self, key: String) -> napi::Result<serde_json::Value> {
+    #[napi(js_name = "kvGet")]
+    pub async fn kv_get(&self, key: String) -> napi::Result<serde_json::Value> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let guard = lock_inner(&inner)?;
@@ -3627,9 +3654,8 @@ impl Strata {
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
     }
 
-    /// Delete a key from the `_system_` branch.
-    #[napi(js_name = "systemKvDelete")]
-    pub async fn system_kv_delete(&self, key: String) -> napi::Result<bool> {
+    #[napi(js_name = "kvDelete")]
+    pub async fn kv_delete(&self, key: String) -> napi::Result<bool> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let guard = lock_inner(&inner)?;
@@ -3639,9 +3665,8 @@ impl Strata {
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
     }
 
-    /// List keys on the `_system_` branch with optional prefix filter.
-    #[napi(js_name = "systemKvList")]
-    pub async fn system_kv_list(&self, prefix: Option<String>) -> napi::Result<Vec<String>> {
+    #[napi(js_name = "kvList")]
+    pub async fn kv_list(&self, prefix: Option<String>) -> napi::Result<Vec<String>> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let guard = lock_inner(&inner)?;
@@ -3654,9 +3679,10 @@ impl Strata {
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
     }
 
-    /// Set a JSON document on the `_system_` branch.
-    #[napi(js_name = "systemJsonSet")]
-    pub async fn system_json_set(
+    // -- JSON --
+
+    #[napi(js_name = "jsonSet")]
+    pub async fn json_set(
         &self,
         key: String,
         path: String,
@@ -3676,13 +3702,8 @@ impl Strata {
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
     }
 
-    /// Get a JSON value from the `_system_` branch.
-    #[napi(js_name = "systemJsonGet")]
-    pub async fn system_json_get(
-        &self,
-        key: String,
-        path: String,
-    ) -> napi::Result<serde_json::Value> {
+    #[napi(js_name = "jsonGet")]
+    pub async fn json_get(&self, key: String, path: String) -> napi::Result<serde_json::Value> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let guard = lock_inner(&inner)?;
@@ -3699,13 +3720,25 @@ impl Strata {
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
     }
 
-    /// Set a state cell on the `_system_` branch.
-    #[napi(js_name = "systemStateSet")]
-    pub async fn system_state_set(
-        &self,
-        cell: String,
-        value: serde_json::Value,
-    ) -> napi::Result<i64> {
+    #[napi(js_name = "jsonDelete")]
+    pub async fn json_delete(&self, key: String, path: String) -> napi::Result<i64> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            guard
+                .system_branch()
+                .json_delete(&key, &path)
+                .map(|n| n as i64)
+                .map_err(to_napi_err)
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    // -- State --
+
+    #[napi(js_name = "stateSet")]
+    pub async fn state_set(&self, cell: String, value: serde_json::Value) -> napi::Result<i64> {
         let inner = self.inner.clone();
         let v = js_to_value_checked(value, 0)?;
         tokio::task::spawn_blocking(move || {
@@ -3720,9 +3753,8 @@ impl Strata {
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
     }
 
-    /// Get a state cell from the `_system_` branch.
-    #[napi(js_name = "systemStateGet")]
-    pub async fn system_state_get(&self, cell: String) -> napi::Result<serde_json::Value> {
+    #[napi(js_name = "stateGet")]
+    pub async fn state_get(&self, cell: String) -> napi::Result<serde_json::Value> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let guard = lock_inner(&inner)?;
@@ -3739,9 +3771,10 @@ impl Strata {
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
     }
 
-    /// Append an event to the `_system_` branch event log.
-    #[napi(js_name = "systemEventAppend")]
-    pub async fn system_event_append(
+    // -- Events --
+
+    #[napi(js_name = "eventAppend")]
+    pub async fn event_append(
         &self,
         event_type: String,
         payload: serde_json::Value,
@@ -3755,6 +3788,24 @@ impl Strata {
                 .event_append(&event_type, v)
                 .map(|n| n as i64)
                 .map_err(to_napi_err)
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
+    }
+
+    #[napi(js_name = "eventGet")]
+    pub async fn event_get(&self, sequence: i64) -> napi::Result<serde_json::Value> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = lock_inner(&inner)?;
+            match guard
+                .system_branch()
+                .event_get(sequence as u64)
+                .map_err(to_napi_err)?
+            {
+                Some(vv) => Ok(versioned_to_js(vv)),
+                None => Ok(serde_json::Value::Null),
+            }
         })
         .await
         .map_err(|e| napi::Error::from_reason(format!("{}", e)))?
